@@ -36,6 +36,13 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# Values read out of providers/<region>.json come from an externally fetched
+# zip archive and are therefore treated as untrusted. The release pipeline
+# only ever writes 16 hex characters here; constrain the pattern to a short
+# alphanumeric token so a tampered provider file cannot escape the
+# ``resources/`` cache via path traversal (CWE-22).
+_SCHEMA_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 _ENHANCED_SCHEMAS_URL = (
     "https://github.com/aws-cloudformation/"
     "resource-provider-enhanced-schemas/releases/download/latest/schemas-cfn-lint.zip"
@@ -283,11 +290,25 @@ class ProviderSchemaManager:
         if not schema_hash:
             raise ResourceNotFoundError(resource_type, region)
 
+        # The provider mapping value is used as a filename below. Reject any
+        # value that is not a simple hash token so a tampered providers file
+        # cannot be used to read arbitrary ``*.json`` files via path
+        # traversal.
+        if not isinstance(schema_hash, str) or not _SCHEMA_HASH_RE.match(
+            schema_hash
+        ):
+            raise ResourceNotFoundError(resource_type, region)
+
         try:
-            schema_file = self._resources_dir / f"{schema_hash}.json"
+            schema_file = (self._resources_dir / f"{schema_hash}.json").resolve()
+            resources_root = self._resources_dir.resolve()
+            if not schema_file.is_relative_to(resources_root):
+                raise ResourceNotFoundError(resource_type, region)
             with open(schema_file, "r", encoding="utf-8") as f:
                 self._schemas[region][resource_type] = Schema(json.load(f))
             return self._schemas[region][resource_type]
+        except ResourceNotFoundError:
+            raise
         except Exception as e:
             raise ResourceNotFoundError(resource_type, region) from e
 

@@ -5,6 +5,8 @@ SPDX-License-Identifier: MIT-0
 """
 
 import logging
+import os
+import re
 import zipfile
 from collections import deque
 from pathlib import Path
@@ -13,6 +15,37 @@ import _translator
 
 from cfnlint.helpers import REGIONS, ToPy, format_json_string, load_plugins
 from cfnlint.schema import PROVIDER_SCHEMA_MANAGER
+
+# Resource type names come from the downloaded providers/<region>.json whose
+# keys are not inherently trustworthy. Restrict them to the CloudFormation
+# ``A::B::C`` grammar (plus the known ``Module`` special case) before using
+# them to build output file paths, to prevent path traversal via crafted
+# resource-type keys (CWE-22).
+_RESOURCE_TYPE_RE = re.compile(r"^[A-Za-z0-9]+::[A-Za-z0-9]+::[A-Za-z0-9]+$")
+_SPECIAL_RESOURCE_TYPES = frozenset({"Module"})
+
+
+def _is_safe_resource_type(resource_type: str) -> bool:
+    """Return True if ``resource_type`` is safe to interpolate into a path."""
+    if resource_type in _SPECIAL_RESOURCE_TYPES:
+        return True
+    return bool(_RESOURCE_TYPE_RE.match(resource_type))
+
+
+def _safe_output_path(base_dir: Path, filename: str) -> Path:
+    """Join ``filename`` under ``base_dir`` and assert containment.
+
+    Uses ``os.path.basename`` to strip any directory components and then
+    verifies via ``Path.resolve().is_relative_to()`` that the resulting path
+    does not escape ``base_dir`` (defence in depth against path traversal).
+    """
+    safe_name = os.path.basename(filename)
+    candidate = (base_dir / safe_name).resolve()
+    if not candidate.is_relative_to(base_dir.resolve()):
+        raise ValueError(
+            f"Refusing to write outside {base_dir!s}: {filename!r}"
+        )
+    return candidate
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -144,9 +177,18 @@ schemas_draft7_dir = schemas_dir / "draft7"
 schemas_draft7_dir.mkdir(parents=True, exist_ok=True)
 
 for resource_type, region in schemas.items():
+    if not _is_safe_resource_type(resource_type):
+        logger.warning(
+            "Skipping untrusted resource type name %r for region %s",
+            resource_type,
+            region,
+        )
+        continue
+
     rt_py = ToPy(resource_type)
 
-    with open(schemas_cfnlint_dir / f"{rt_py.py}.json", "w") as f:
+    cfnlint_out = _safe_output_path(schemas_cfnlint_dir, f"{rt_py.py}.json")
+    with open(cfnlint_out, "w") as f:
         f.write(
             format_json_string(
                 PROVIDER_SCHEMA_MANAGER.get_resource_schema(
@@ -157,7 +199,8 @@ for resource_type, region in schemas.items():
 
     _translator.translator(resource_type, region)
 
-    with open(schemas_draft7_dir / f"{rt_py.py}.json", "w") as f:
+    draft7_out = _safe_output_path(schemas_draft7_dir, f"{rt_py.py}.json")
+    with open(draft7_out, "w") as f:
         f.write(
             format_json_string(
                 PROVIDER_SCHEMA_MANAGER.get_resource_schema(
