@@ -11,7 +11,7 @@ import traceback
 from functools import lru_cache
 from typing import Any, Iterator, Set, Tuple
 
-from sympy import And, Implies, Not, Symbol
+from sympy import And, Dummy, Implies, Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.boolalg import BooleanFalse, BooleanTrue
 from sympy.logic.inference import satisfiable
@@ -114,6 +114,14 @@ class Conditions:
 
         equals: dict[str, Equal] = {}
 
+        # Group non-static equals by the parameter hash they reference so we
+        # can emit a single linear at-most-one (AMO) constraint per parameter
+        # instead of O(n^2) pairwise NAND clauses. A single parameter can
+        # only equal one value at a time, so at most one Fn::Equals that
+        # compares the same parameter may be True in any model.
+        equals_by_param: dict[str, list[str]] = {}
+        seen_in_param: dict[str, set[str]] = {}
+
         def _build_equal_vars(c_equals: list[Equal]):
             for c_equal in c_equals:
                 if c_equal.hash in equal_vars:
@@ -126,16 +134,17 @@ class Conditions:
                         equal_vars[c_equal.hash] = BooleanFalse()
                 else:
                     equal_vars[c_equal.hash] = Symbol(c_equal.hash)
-                    # See if parameter in this equals is the same as another equals
+                    # Record this equal under each parameter it references;
+                    # the mutual-exclusion constraint is emitted once per
+                    # parameter group below.
                     for param in c_equal.parameters:
-                        for e_hash, e_equals in equals.items():
-                            if param in e_equals.parameters:
-                                # equivalent to NAND logic. We want to make
-                                # sure that both equals are not both True
-                                # at the same time
-                                cnf.add_prop(
-                                    ~(equal_vars[c_equal.hash] & equal_vars[e_hash])
-                                )
+                        seen = seen_in_param.setdefault(param.hash, set())
+                        if c_equal.hash in seen:
+                            continue
+                        seen.add(c_equal.hash)
+                        equals_by_param.setdefault(param.hash, []).append(
+                            c_equal.hash
+                        )
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:
@@ -143,6 +152,42 @@ class Conditions:
 
         for condition_name in condition_names:
             _build_equal_vars(self._conditions[condition_name].equals)
+
+        # Emit a linear at-most-one encoding per parameter group. This is the
+        # Sinz (2005) sequential counter encoding: for variables x_1..x_n
+        # introduce auxiliary "prefix" symbols s_1..s_{n-1} such that
+        # s_i <-> (x_1 \/ ... \/ x_i) \wedge AMO. The clauses are:
+        #   (!x_i \/ s_i)         for i = 1..n-1
+        #   (!s_{i-1} \/ s_i)     for i = 2..n-1
+        #   (!x_i \/ !s_{i-1})    for i = 2..n
+        # which is 3n-4 clauses, linear in n, versus n*(n-1)/2 pairwise NANDs.
+        # For n == 2 we fall back to the single NAND clause (!x_1 \/ !x_2).
+        for _param_hash, hashes in equals_by_param.items():
+            n = len(hashes)
+            if n < 2:
+                continue
+            if n == 2:
+                cnf.add_prop(
+                    ~(equal_vars[hashes[0]] & equal_vars[hashes[1]])
+                )
+                continue
+            # Build prefix auxiliaries using sympy Dummy symbols so they do
+            # not collide with the hash-named Symbols that the rest of the
+            # engine references by name.
+            prefix = [Dummy("amo") for _ in range(n - 1)]
+            # (!x_1 \/ s_1)
+            cnf.add_prop(Or(Not(equal_vars[hashes[0]]), prefix[0]))
+            for i in range(1, n - 1):
+                # (!x_i \/ s_i)
+                cnf.add_prop(Or(Not(equal_vars[hashes[i]]), prefix[i]))
+                # (!s_{i-1} \/ s_i)
+                cnf.add_prop(Or(Not(prefix[i - 1]), prefix[i]))
+                # (!x_i \/ !s_{i-1})
+                cnf.add_prop(Or(Not(equal_vars[hashes[i]]), Not(prefix[i - 1])))
+            # (!x_n \/ !s_{n-1})
+            cnf.add_prop(
+                Or(Not(equal_vars[hashes[n - 1]]), Not(prefix[n - 2]))
+            )
 
         # Determine if a set of conditions can never be all false
         allowed_values = {k: list(v) for k, v in self._parameters.items()}
