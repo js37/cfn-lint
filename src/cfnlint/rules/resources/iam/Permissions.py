@@ -57,7 +57,7 @@ class Permissions(CfnLintKeyword):
                     "Must be of the form service:action or '*'",
                     rule=self,
                 )
-                return
+                continue
             service, permission = action.split(":", 1)
             service = service.lower()
             permission = permission.lower()
