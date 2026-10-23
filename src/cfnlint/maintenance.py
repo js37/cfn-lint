@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
+from urllib.parse import urlparse
 
 import cfnlint
 import cfnlint.data.AdditionalSpecs
@@ -14,6 +16,39 @@ from cfnlint.helpers import get_url_content
 from cfnlint.schema import PROVIDER_SCHEMA_MANAGER
 
 LOGGER = logging.getLogger(__name__)
+
+# Hosts permitted as sources for the service-reference index and the
+# per-service documents it links to. Anything else -- including other
+# schemes such as ``file:``, ``ftp:`` or ``data:`` that ``urlopen``
+# would otherwise accept -- is rejected before the fetch.
+_SERVICE_REFERENCE_ALLOWED_HOSTS = frozenset(
+    {
+        "servicereference.us-east-1.amazonaws.com",
+    }
+)
+
+
+def _validate_service_reference_url(url):
+    """Return ``url`` if it is an https URL on the service-reference allowlist.
+
+    Raises ``ValueError`` otherwise. The index response is treated as
+    untrusted input: a tampered or MITM'd response must not be able to
+    coerce ``urlopen`` into reading ``file://`` paths or contacting an
+    arbitrary host.
+    """
+    if not isinstance(url, str):
+        raise ValueError(f"Service URL must be a string, got {type(url).__name__}")
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(
+            f"Refusing to fetch service URL with scheme {parsed.scheme!r}: {url}"
+        )
+    host = (parsed.hostname or "").lower()
+    if host not in _SERVICE_REFERENCE_ALLOWED_HOSTS:
+        raise ValueError(
+            f"Refusing to fetch service URL from unexpected host {host!r}: {url}"
+        )
+    return url
 
 
 def update_resource_specs(force: bool = False) -> int:
@@ -120,7 +155,12 @@ def update_iam_policies():
     )
     LOGGER.debug("Downloading policies %s into %s", url, filename)
 
-    services = json.loads(get_url_content(url))
+    services = json.loads(get_url_content(_validate_service_reference_url(url)))
+    if not isinstance(services, list):
+        raise ValueError(
+            "Service reference index must be a JSON array, "
+            f"got {type(services).__name__}"
+        )
 
     def _clean_arn_formats(arn):
         arn_parts = arn.split(":", 5)
@@ -173,12 +213,69 @@ def update_iam_policies():
 
         return results
 
+    def _validate_service_payload(payload, service_name):
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"Service {service_name!r} payload must be a JSON object, "
+                f"got {type(payload).__name__}"
+            )
+        for key in ("Actions", "Resources"):
+            value = payload.get(key, [])
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"Service {service_name!r} field {key!r} must be a list"
+                )
+            for entry in value:
+                if not isinstance(entry, dict) or not isinstance(
+                    entry.get("Name"), str
+                ):
+                    raise ValueError(
+                        f"Service {service_name!r} {key!r} entries must be "
+                        "objects with a string 'Name'"
+                    )
+        for resource in payload.get("Resources", []):
+            arn_formats = resource.get("ARNFormats")
+            if not isinstance(arn_formats, list) or not all(
+                isinstance(a, str) for a in arn_formats
+            ):
+                raise ValueError(
+                    f"Service {service_name!r} resource "
+                    f"{resource.get('Name')!r} must have a list of string "
+                    "'ARNFormats'"
+                )
+        return payload
+
     data = {}
     for service in services:
+        if not isinstance(service, dict):
+            raise ValueError(
+                "Service reference index entries must be objects, "
+                f"got {type(service).__name__}"
+            )
         name = service.get("service")
-        content = json.loads(get_url_content(service.get("url")))
-        data[name] = _processes_a_service(content)
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                "Service reference index entry is missing a string 'service'"
+            )
+        service_url = _validate_service_reference_url(service.get("url"))
+        content = json.loads(get_url_content(service_url))
+        data[name] = _processes_a_service(_validate_service_payload(content, name))
 
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1, sort_keys=True, separators=(",", ": "))
-        f.write("\n")
+    # Write to a temporary file in the same directory and atomically
+    # replace the destination so a failed/partial run can never leave a
+    # truncated Policies.json behind.
+    target_dir = os.path.dirname(filename) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".Policies.json.", suffix=".tmp", dir=target_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1, sort_keys=True, separators=(",", ": "))
+            f.write("\n")
+        os.replace(tmp_path, filename)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
