@@ -43,8 +43,13 @@ class Pattern(CloudFormationLintRule):
         if not validator.context.allow_exceptions:
             return False
         for exception in self.config["exceptions"]:
-            if re.match(exception, instance):
-                return True
+            try:
+                # Bound each operator-supplied regex: a pathological pattern
+                # (CWE-1333) must not pin cfn-lint on an attacker-sized value.
+                if re.match(exception, instance, timeout=1.0):
+                    return True
+            except (re.error, TimeoutError):
+                continue
         return False
 
     # pylint: disable=unused-argument, arguments-renamed

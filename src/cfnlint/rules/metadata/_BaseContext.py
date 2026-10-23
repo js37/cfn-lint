@@ -12,7 +12,7 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
-import re
+import regex as re
 from typing import Any
 
 CONTEXT_KEY = "com.aws.cloudformation.Context"
@@ -36,6 +36,12 @@ _INCIDENTAL_ID_PATTERN = re.compile(
 _PATTERNS_CONFIG: dict[str, Any] = {"default": [], "type": "list", "itemtype": "string"}
 
 
+# Per-pattern wall-clock budget for operator-supplied regexes. Keeps a
+# pathologically backtracking pattern (e.g. `(a+)+b`) from pinning the
+# process; the pattern is simply skipped if it does not terminate quickly.
+_REGEX_TIMEOUT_SECONDS = 1.0
+
+
 def _is_incidental(logical_id: str, extra_patterns: list[str]) -> bool:
     """True when the resource is incidental/framework per the targeting policy.
 
@@ -48,9 +54,9 @@ def _is_incidental(logical_id: str, extra_patterns: list[str]) -> bool:
         return True
     for pattern in extra_patterns:
         try:
-            if re.search(pattern, logical_id):
+            if re.search(pattern, logical_id, timeout=_REGEX_TIMEOUT_SECONDS):
                 return True
-        except re.error:
+        except (re.error, TimeoutError):
             continue
     return False
 
