@@ -29,7 +29,7 @@ def mock_glob(value, recursive):
             {
                 _filename_dev: (
                     {
-                        "template-file-path": "../a/path",
+                        "template-file-path": "a/path",
                         "parameters": {
                             "Foo": "Bar",
                         },
@@ -51,7 +51,7 @@ def mock_glob(value, recursive):
                             )
                         ],
                         templates=[
-                            "../a/path",
+                            "a/path",
                         ],
                     ),
                     [],
@@ -63,7 +63,7 @@ def mock_glob(value, recursive):
             {
                 _filename_dev: (
                     {
-                        "template-file-path": "../a/path",
+                        "template-file-path": "a/path",
                         "parameters": {
                             "Foo": "Bar",
                         },
@@ -75,7 +75,7 @@ def mock_glob(value, recursive):
                 ),
                 _filename_prod: (
                     {
-                        "template-file-path": "../a/path",
+                        "template-file-path": "a/path",
                         "parameters": {
                             "Foo": "Foo",
                         },
@@ -100,7 +100,7 @@ def mock_glob(value, recursive):
                             ),
                         ],
                         templates=[
-                            "../a/path",
+                            "a/path",
                         ],
                     ),
                     [],
@@ -112,7 +112,7 @@ def mock_glob(value, recursive):
             {
                 _filename_dev: (
                     {
-                        "template-file-path": "../a/path",
+                        "template-file-path": "a/path",
                         "parameters": {
                             "Foo": "Bar",
                         },
@@ -124,7 +124,7 @@ def mock_glob(value, recursive):
                 ),
                 _filename_prod: (
                     {
-                        "template-file-path": "../b/path",
+                        "template-file-path": "b/path",
                         "parameters": {
                             "Foo": "Foo",
                         },
@@ -146,7 +146,7 @@ def mock_glob(value, recursive):
                             ),
                         ],
                         templates=[
-                            "../a/path",
+                            "a/path",
                         ],
                     ),
                     [],
@@ -161,7 +161,7 @@ def mock_glob(value, recursive):
                             ),
                         ],
                         templates=[
-                            "../b/path",
+                            "b/path",
                         ],
                     ),
                     [],
@@ -269,6 +269,102 @@ def mock_glob(value, recursive):
                         ),
                     ],
                 ),
+            ],
+        ),
+        (
+            "Rejects absolute template-file-path",
+            {
+                _filename_dev: (
+                    {
+                        "template-file-path": "/etc/passwd",
+                        "parameters": {},
+                        "tags": {},
+                    },
+                    [],
+                ),
+            },
+            [
+                (
+                    None,
+                    [
+                        Match(
+                            linenumber=1,
+                            columnnumber=1,
+                            linenumberend=1,
+                            columnnumberend=1,
+                            filename=_filename_dev,
+                            message=(
+                                "Template file path '/etc/passwd' must be a "
+                                "relative path"
+                            ),
+                            rule=Configuration(),
+                        )
+                    ],
+                )
+            ],
+        ),
+        (
+            "Rejects parent-directory traversal in template-file-path",
+            {
+                _filename_dev: (
+                    {
+                        "template-file-path": "../a/path",
+                        "parameters": {},
+                        "tags": {},
+                    },
+                    [],
+                ),
+            },
+            [
+                (
+                    None,
+                    [
+                        Match(
+                            linenumber=1,
+                            columnnumber=1,
+                            linenumberend=1,
+                            columnnumberend=1,
+                            filename=_filename_dev,
+                            message=(
+                                "Template file path '../a/path' must not "
+                                "contain '..' path segments"
+                            ),
+                            rule=Configuration(),
+                        )
+                    ],
+                )
+            ],
+        ),
+        (
+            "Rejects glob metacharacters in template-file-path",
+            {
+                _filename_dev: (
+                    {
+                        "template-file-path": "**/*.json",
+                        "parameters": {},
+                        "tags": {},
+                    },
+                    [],
+                ),
+            },
+            [
+                (
+                    None,
+                    [
+                        Match(
+                            linenumber=1,
+                            columnnumber=1,
+                            linenumberend=1,
+                            columnnumberend=1,
+                            filename=_filename_dev,
+                            message=(
+                                "Template file path '**/*.json' contains "
+                                "glob metacharacters, which are not allowed"
+                            ),
+                            rule=Configuration(),
+                        )
+                    ],
+                )
             ],
         ),
     ],
