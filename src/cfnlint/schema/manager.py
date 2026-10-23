@@ -5,6 +5,7 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -126,6 +127,7 @@ class ProviderSchemaManager:
         self.get_resource_schema.cache_clear()
         self.get_resource_types.cache_clear()
         self.get_type_getatts.cache_clear()
+        self.get_type_ref.cache_clear()
 
     def _load_sam_module(self) -> dict[str, str]:
         """Load the SAM provider mapping from sam.json.
@@ -274,7 +276,17 @@ class ProviderSchemaManager:
             return schema
 
         if resource_type in self._registry_schemas:
-            self._schemas[region][resource_type] = self._registry_schemas[resource_type]
+            # Construct a per-region Schema from a deep copy of the
+            # registry's schema document. Without this, a later
+            # ``Schema.patch`` (e.g. from an ``--override-spec`` applied
+            # across multiple regions) would mutate the single shared
+            # registry object: a non-idempotent patch (``remove``/``move``)
+            # would succeed on the first region and fail on the second,
+            # and idempotent ``add`` operations would silently stack once
+            # per region.
+            self._schemas[region][resource_type] = Schema(
+                copy.deepcopy(self._registry_schemas[resource_type].schema)
+            )
             return self._schemas[region][resource_type]
 
         provider_types = self._load_provider_module(region)
@@ -524,6 +536,7 @@ class ProviderSchemaManager:
             self.get_resource_schema.cache_clear()
             self.get_resource_types.cache_clear()
 
+        patched_any = False
         for resource_type, patches in patch.patches.items():
             try:
                 schema = self.get_resource_schema(
@@ -534,9 +547,17 @@ class ProviderSchemaManager:
                 continue
             try:
                 schema.patch(patches=patches)
+                patched_any = True
             except Exception as e:
                 print(f"Error applying patch {patches} for {resource_type}: {e}")
                 sys.exit(1)
+
+        # The GetAtt/Ref views memoized by ``get_type_getatts`` /
+        # ``get_type_ref`` were derived from the pre-patch schema, so
+        # invalidate them whenever a schema in this manager was mutated.
+        if patched_any or removed_types:
+            self.get_type_getatts.cache_clear()
+            self.get_type_ref.cache_clear()
 
     @lru_cache(maxsize=None)
     def get_type_getatts(self, resource_type: str, region: str) -> AttributeDict:
