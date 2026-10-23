@@ -317,7 +317,27 @@ def CreateNotEqualsRule(rule_id, resourceType, prop, value, error_message):
 def CreateRegexMatchRule(rule_id, resourceType, prop, value, error_message):
     def rule_func(value, expected_values, path):
         matches = []
-        if not re.match(expected_values.strip(), str(value).strip()):
+        # The REGEX_MATCH operator is specified to constrain the whole
+        # property value. We therefore use ``fullmatch`` (prefix-only
+        # ``match`` previously allowed any value whose prefix satisfied the
+        # pattern to pass, bypassing guardrails like ``^corp-[a-z0-9-]+``).
+        # Guard against a non-string pattern - ``get_value`` may have
+        # JSON-decoded the pattern into an int/list - so a malformed rule
+        # fails loudly with a clear ``RuleMatch`` instead of raising an
+        # internal ``AttributeError`` from ``expected_values.strip()``.
+        if not isinstance(expected_values, str):
+            matches.append(
+                cfnlint.rules.RuleMatch(
+                    path,
+                    error_message
+                    or (
+                        "REGEX_MATCH pattern must be a string, got "
+                        f"{type(expected_values).__name__}"
+                    ),
+                )
+            )
+            return matches
+        if not re.fullmatch(expected_values.strip(), str(value).strip()):
             matches.append(
                 cfnlint.rules.RuleMatch(path, error_message or "Regex does not match")
             )
