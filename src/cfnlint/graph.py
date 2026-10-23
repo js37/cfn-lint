@@ -47,10 +47,30 @@ class GraphSettings:
     parameter: NodeSetting
     output: NodeSetting
 
+    # Characters outside this set are stripped from template-controlled
+    # strings (logical IDs and resource `Type` values) before they are used
+    # to build DOT labels or node names. This prevents a malicious template
+    # from breaking out of the manual `"..."` quoting used for DOT output
+    # (e.g. injecting `URL=`, `image=` or new `node [..]` statements into
+    # the generated .dot file via quote/`]`/`;`/newline characters).
+    _dot_safe_re = re.compile(r"[^A-Za-z0-9:_.\-]")
+
+    def _dot_safe(self, value: str) -> str:
+        """Strip any character that is not safe for use inside a manually
+        double-quoted DOT identifier or attribute value."""
+        if not isinstance(value, str):
+            return value
+        return self._dot_safe_re.sub("_", value)
+
     def _pydot_string_convert(self, value: str | int) -> str | int:
         if not isinstance(value, str):
             return value
         if ":" in value:
+            # The caller is expected to have passed a value built from
+            # `_dot_safe`-sanitized parts (plus any literal `\\n` label
+            # separators cfn-lint inserts itself), so simple quote wrapping
+            # is safe. See `_add_resources` / `_add_parameters` /
+            # `_add_outputs` where the sanitization is applied.
             return f'"{value}"'
 
         return value
@@ -70,7 +90,14 @@ class GraphSettings:
             node["label"] = self._pydot_string_convert(node["label"])
             node["type"] = self._pydot_string_convert(node["type"])
             del node["resource_type"]
-            view.add_node(resource, **node)
+            # Node names come from untrusted CloudFormation logical IDs
+            # (YAML/JSON keys) and are written into the .dot file as the
+            # statement's node id. pydot treats a value that already looks
+            # quoted as pre-quoted and emits it verbatim, so a logical ID
+            # like `"a" [color="red"]; "b"` would otherwise inject raw DOT
+            # statements. Sanitize it to a safe identifier charset.
+            safe_resource = self._dot_safe(resource)
+            view.add_node(safe_resource, **node)
 
         for edge_1, edge_2, edge_data in graph.edges(data=True):
             if edge_1 in resources and edge_2 in resources:
@@ -78,8 +105,8 @@ class GraphSettings:
                     edge_data["source_paths"]
                 )
                 view.add_edge(
-                    edge_1,
-                    edge_2,
+                    self._dot_safe(edge_1),
+                    self._dot_safe(edge_2),
                     **edge_data,
                 )
 
@@ -142,7 +169,11 @@ class Graph:
             type_val = parameter_values.get("Type", "")
             if not isinstance(type_val, str):
                 continue
-            graph_label = str.format(f'"{parameter_id}\\n<{type_val}>"')
+            # Sanitize untrusted template-controlled strings before building
+            # the DOT label — see `GraphSettings._dot_safe` for rationale.
+            safe_parameter_id = self.settings._dot_safe(parameter_id)
+            safe_type_val = self.settings._dot_safe(type_val)
+            graph_label = str.format(f'"{safe_parameter_id}\\n<{safe_type_val}>"')
             self._add_node(
                 parameter_id, label=graph_label, settings=self.settings.parameter
             )
@@ -153,7 +184,8 @@ class Graph:
         if not isinstance(outputs, dict):
             return
         for output_id in outputs.keys():
-            graph_label = str.format(f'"{output_id}"')
+            safe_output_id = self.settings._dot_safe(output_id)
+            graph_label = str.format(f'"{safe_output_id}"')
             self._add_node(output_id, settings=self.settings.output, label=graph_label)
 
     def _add_resources(self, cfn: Any):
@@ -164,7 +196,11 @@ class Graph:
             type_val = resourceVals.get("Type", "")
             if not isinstance(type_val, str):
                 continue
-            graph_label = str.format(f"{resourceId}\\n<{type_val}>")
+            # Sanitize untrusted template-controlled strings before building
+            # the DOT label — see `GraphSettings._dot_safe` for rationale.
+            safe_resource_id = self.settings._dot_safe(resourceId)
+            safe_type_val = self.settings._dot_safe(type_val)
+            graph_label = str.format(f"{safe_resource_id}\\n<{safe_type_val}>")
             self._add_node(
                 resourceId,
                 settings=self.settings.resource,
