@@ -143,3 +143,58 @@ class TestCustomRuleParsing(BaseTestCase):
             rules = Rules()
             rules.update(rules.create_from_custom_rules_file(rulename))
             return list(_run_template(filename, template, ConfigMixIn({}), rules))
+
+
+class TestCustomRuleSetParsing(BaseTestCase):
+    """Directly test parsing of IN/NOT_IN bracketed set values."""
+
+    def _parse(self, line):
+        from cfnlint.rules.custom import make_rule
+
+        return make_rule(line, 1)
+
+    def test_in_set_with_spaces_and_error_level(self):
+        rule = self._parse(
+            'AWS::EC2::Instance InstanceType IN'
+            ' [t2.micro, t3.micro] ERROR "allowed only"'
+        )
+        assert rule.property_value == ["t2.micro", "t3.micro"]
+
+    def test_not_in_set_with_spaces_and_error_level(self):
+        rule = self._parse(
+            'AWS::EC2::Instance InstanceType NOT_IN'
+            ' [p3.2xlarge, p4d.24xlarge] ERROR "not allowed"'
+        )
+        assert rule.property_value == ["p3.2xlarge", "p4d.24xlarge"]
+
+    def test_in_set_with_spaces_no_error_level(self):
+        rule = self._parse(
+            "AWS::EC2::Instance InstanceType IN [t2.micro, t3.micro]"
+        )
+        assert rule.property_value == ["t2.micro", "t3.micro"]
+
+    def test_not_in_set_with_spaces_no_error_level(self):
+        rule = self._parse(
+            "AWS::EC2::Instance InstanceType NOT_IN [p3.2xlarge, p4d.24xlarge]"
+        )
+        assert rule.property_value == ["p3.2xlarge", "p4d.24xlarge"]
+
+    def test_not_in_set_without_trailing_space_before_error(self):
+        # Previously `raw_value[1:-2]` truncated the last character of the
+        # final element when no space preceded ERROR/WARN.
+        rule = self._parse(
+            'AWS::EC2::Instance InstanceType NOT_IN [p3.2xlarge]ERROR "x"'
+        )
+        assert rule.property_value == ["p3.2xlarge"]
+
+    def test_in_set_single_element_no_error_level(self):
+        rule = self._parse(
+            "AWS::EC2::Instance InstanceType IN [t2.micro]"
+        )
+        assert rule.property_value == ["t2.micro"]
+
+    def test_in_set_quoted_elements(self):
+        rule = self._parse(
+            'AWS::EC2::Instance InstanceType IN ["t2.micro", "t3.micro"] ERROR msg'
+        )
+        assert rule.property_value == ["t2.micro", "t3.micro"]

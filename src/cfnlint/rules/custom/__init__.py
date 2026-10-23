@@ -29,16 +29,14 @@ def make_rule(line, lineNumber):
         return value, error_message
 
     def process_sets(raw_value):
+        stripped = raw_value.strip()
         if (
-            len(raw_value) > 1
-            and raw_value[0] == "["
-            and (raw_value[-2] == "]" or raw_value[-1] == "]")
+            len(stripped) > 1
+            and stripped[0] == "["
+            and stripped[-1] == "]"
         ):
-            raw_value = raw_value[1:-2]
-            raw_value = raw_value.split(",")
-            for x in raw_value:
-                x = x.strip()
-            return raw_value
+            inner = stripped[1:-1]
+            return [item.strip().strip('"') for item in inner.split(",")]
 
         return raw_value
 
@@ -62,7 +60,11 @@ def make_rule(line, lineNumber):
                 value, error_message = set_arguments(line[3], "ERROR")
             else:
                 value = process_sets(line[3])
-                value = get_value(line[3])
+                # Only fall back to get_value when process_sets did not
+                # recognize a bracketed set; otherwise keep the parsed list
+                # so IN/NOT_IN compare against a real list.
+                if not isinstance(value, list):
+                    value = get_value(line[3])
 
             if isinstance(value, str):
                 value = value.strip().strip('"')
