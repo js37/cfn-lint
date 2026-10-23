@@ -95,8 +95,19 @@ class NodeConstructor(SafeConstructor):
     def flatten_mapping(self, node):
         # Rewrote to handle merging and overwriting keys
         if any(key_node.tag == "tag:yaml.org,2002:merge" for key_node, _ in node.value):
+            original_len = len(node.value)
             super().flatten_mapping(node)
             setattr(node, "using_merge", True)
+            # SafeConstructor.flatten_mapping removes each `<<` entry and
+            # prepends the referenced mapping(s) in its place. Record how many
+            # entries at the start of node.value originated from the merge so
+            # the duplicate-key check can scope its exemption to just those
+            # merged entries instead of silencing the whole mapping.
+            setattr(
+                node,
+                "merged_prefix_len",
+                max(0, len(node.value) - original_len),
+            )
         super().flatten_mapping(node)
 
     # To support lazy loading, the original constructors first yield
@@ -109,9 +120,11 @@ class NodeConstructor(SafeConstructor):
         # because a dict does not support this. It overwrites it with the last
         # occurance, which can give unexpected results
         mapping = {}
+        seen: dict = {}
+        prev_indices: dict = {}
         self.flatten_mapping(node)
         matches = []
-        for key_node, value_node in node.value:
+        for index, (key_node, value_node) in enumerate(node.value):
             key = self.construct_object(key_node, False)
             value = self.construct_object(value_node, False)
 
@@ -131,11 +144,49 @@ class NodeConstructor(SafeConstructor):
                         ),
                     ],
                 )
-            if not getattr(node, "using_merge", False):
-                for key_dup in mapping:
-                    if key_dup == key:
-                        if matches:
-                            matches.append(
+            # Only exempt duplicates where at least one of the two colliding
+            # occurrences came from the YAML merge prefix prepended by
+            # flatten_mapping. Collisions between the mapping's own literal
+            # entries are always reported, even when a `<<` entry is also
+            # present in the mapping.
+            merged_prefix_len = getattr(node, "merged_prefix_len", 0)
+            current_in_merge = index < merged_prefix_len
+            try:
+                already_present = key in mapping
+            except TypeError:
+                # Unhashable key -- the mapping[key] = value assignment below
+                # will raise CfnParseError with the right diagnostic.
+                already_present = False
+            if already_present:
+                prev_key_node = seen[key]
+                prev_in_merge = prev_indices[key] < merged_prefix_len
+                if not (current_in_merge or prev_in_merge):
+                    if matches:
+                        matches.append(
+                            build_match(
+                                filename=self.filename,
+                                message=(
+                                    f"Duplicate found {key!r} (line"
+                                    f" {key_node.start_mark.line + 1})"
+                                ),
+                                line_number=key_node.start_mark.line,
+                                column_number=key_node.start_mark.column,
+                                key=key,
+                            )
+                        )
+                    else:
+                        matches.extend(
+                            [
+                                build_match(
+                                    filename=self.filename,
+                                    message=(
+                                        f"Duplicate found {key!r} (line"
+                                        f" {prev_key_node.start_mark.line + 1})"
+                                    ),
+                                    line_number=prev_key_node.start_mark.line,
+                                    column_number=prev_key_node.start_mark.column,
+                                    key=key,
+                                ),
                                 build_match(
                                     filename=self.filename,
                                     message=(
@@ -145,33 +196,12 @@ class NodeConstructor(SafeConstructor):
                                     line_number=key_node.start_mark.line,
                                     column_number=key_node.start_mark.column,
                                     key=key,
-                                )
-                            )
-                        else:
-                            matches.extend(
-                                [
-                                    build_match(
-                                        filename=self.filename,
-                                        message=(
-                                            f"Duplicate found {key!r} (line"
-                                            f" {key_dup.start_mark.line + 1})"
-                                        ),
-                                        line_number=key_dup.start_mark.line,
-                                        column_number=key_dup.start_mark.column,
-                                        key=key,
-                                    ),
-                                    build_match(
-                                        filename=self.filename,
-                                        message=(
-                                            f"Duplicate found {key!r} (line"
-                                            f" {key_node.start_mark.line + 1})"
-                                        ),
-                                        line_number=key_node.start_mark.line,
-                                        column_number=key_node.start_mark.column,
-                                        key=key,
-                                    ),
-                                ],
-                            )
+                                ),
+                            ],
+                        )
+            else:
+                seen[key] = key_node
+                prev_indices[key] = index
             try:
                 mapping[key] = value
             except Exception as exc:
