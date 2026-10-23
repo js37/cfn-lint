@@ -6,9 +6,18 @@ SPDX-License-Identifier: MIT-0
 import regex as re
 
 from cfnlint._typing import RuleMatches
-from cfnlint.helpers import REGEX_DYN_REF, REGEX_DYN_REF_SSM
+from cfnlint.helpers import REGEX_DYN_REF_SSM
 from cfnlint.rules import CloudFormationLintRule, RuleMatch
 from cfnlint.template import Template
+
+# Unanchored scanner that matches any `{{resolve:...}}` dynamic reference so
+# the literal remainder of the surrounding value can be inspected. Non-greedy
+# so adjacent references in the same string are not swallowed into one match.
+_REGEX_DYN_REF_SCAN = re.compile(r"\{\{resolve:[^}]+\}\}")
+# Characters that count as "obvious separator/prefix" noise around a dynamic
+# reference (e.g. 'Prefix-', '/path/', 'list:'). Anything else left over after
+# stripping references is treated as literal credential material.
+_TRIVIAL_LITERAL_CHARS = set(" \t-/:_.")
 
 
 class Password(CloudFormationLintRule):
@@ -52,16 +61,33 @@ class Password(CloudFormationLintRule):
             for tree in trees:
                 obj = tree[-1]
                 if isinstance(obj, (str)):
-                    if re.match(REGEX_DYN_REF, obj):
-                        if re.match(REGEX_DYN_REF_SSM, obj):
-                            message = (
-                                "Password should use a secure dynamic reference for"
-                                f" {'/'.join(map(str, tree[:-1]))}"
-                            )
-                            matches.append(RuleMatch(tree[:-1], message))
-                    else:
+                    # Strip every `{{resolve:...}}` occurrence and inspect the
+                    # literal remainder. If a non-trivial literal remains
+                    # (anything beyond obvious separator/prefix characters),
+                    # treat the surrounding text as hardcoded credential
+                    # material -- CloudFormation concatenates it with the
+                    # resolved reference at deploy time.
+                    stripped = _REGEX_DYN_REF_SCAN.sub("", obj)
+                    has_dyn_ref = stripped != obj
+                    literal_remainder = stripped.strip()
+                    non_trivial_literal = any(
+                        ch not in _TRIVIAL_LITERAL_CHARS
+                        for ch in literal_remainder
+                    )
+                    if not has_dyn_ref or non_trivial_literal:
                         message = (
                             "Password shouldn't be hardcoded for"
+                            f" {'/'.join(map(str, tree[:-1]))}"
+                        )
+                        matches.append(RuleMatch(tree[:-1], message))
+                    # Independently flag plain (non-secure) `ssm:` dynamic
+                    # references regardless of the hardcoded classification.
+                    # Use an anchored fullmatch so the whole value must be a
+                    # single plain-ssm reference to trigger the secure-
+                    # reference recommendation.
+                    if re.fullmatch(REGEX_DYN_REF_SSM, obj):
+                        message = (
+                            "Password should use a secure dynamic reference for"
                             f" {'/'.join(map(str, tree[:-1]))}"
                         )
                         matches.append(RuleMatch(tree[:-1], message))
