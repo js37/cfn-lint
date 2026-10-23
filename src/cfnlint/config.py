@@ -156,6 +156,19 @@ class ConfigFileArgs:
             LOGGER.debug("Validating Project CFNLINTRC")
             self.validate_config(project_config, self.schema)
 
+            # Project-level ``.cfnlintrc`` files are auto-discovered from
+            # ``Path.cwd()``. In CI/pre-commit flows that directory can be
+            # untrusted (a fork or PR checkout), so we refuse to honour
+            # keys from it that drive arbitrary code loading. A trusted
+            # operator who wants these keys must pass the file explicitly
+            # via ``--config-file`` (which uses ``_custom_config_file``)
+            # or set them on the CLI. ``~/.cfnlintrc`` is the operator's
+            # own home directory config and is left untouched.
+            if self._project_config_file:
+                self._strip_privileged_keys(
+                    project_config, str(self._project_config_file)
+                )
+
             LOGGER.debug("User configuration loaded as")
             LOGGER.debug("%s", user_config)
             LOGGER.debug("Project configuration loaded as")
@@ -163,6 +176,45 @@ class ConfigFileArgs:
 
             LOGGER.debug("Merging configurations...")
             self.file_args = self.merge_config(user_config, project_config)
+
+    # Keys that cause cfn-lint to load/execute code or external spec
+    # patches. They must only come from an operator-controlled source
+    # (CLI flags, ``--config-file``, or ``~/.cfnlintrc``), never from a
+    # ``.cfnlintrc`` auto-discovered inside the linted working tree.
+    _PRIVILEGED_CONFIG_KEYS = (
+        "append_rules",
+        "custom_rules",
+        "override_spec",
+        "registry_schemas",
+    )
+
+    def _strip_privileged_keys(self, config, source_description):
+        """Remove privileged keys from an auto-discovered project config.
+
+        See :attr:`_PRIVILEGED_CONFIG_KEYS`. Pointing ``--append-rules``
+        at a directory is equivalent to running the Python files it
+        contains; letting a repo-controlled ``.cfnlintrc`` set that key
+        would turn ``cfn-lint <template>`` into arbitrary code execution
+        for anyone who can commit to the linted repository.
+        """
+        if not isinstance(config, dict):
+            return
+        for key in self._PRIVILEGED_CONFIG_KEYS:
+            if key in config:
+                LOGGER.warning(
+                    (
+                        "Ignoring '%s' from auto-discovered project config %s: "
+                        "this key can load/execute arbitrary code and is only "
+                        "honoured from the CLI or an explicit --config-file. "
+                        "Pass -a/--append-rules, --custom-rules, "
+                        "--override-spec or --registry-schemas on the "
+                        "command line, or load the config file explicitly "
+                        "with --config-file."
+                    ),
+                    key,
+                    source_description,
+                )
+                config.pop(key, None)
 
     def validate_config(self, config, schema):
         """Validate configuration against schema
@@ -742,6 +794,30 @@ class TemplateArgs:
                 }.items():
                     if key in configs:
                         if isinstance(configs[key], value):
+                            # Keys that cause code loading or external
+                            # spec patching are refused from template
+                            # metadata: the template is part of the
+                            # linted (untrusted) content, so a repo
+                            # that controls Resources.*.Metadata could
+                            # otherwise redirect cfn-lint into
+                            # arbitrary code via ``merge_configs``.
+                            if key in (
+                                "append_rules",
+                                "custom_rules",
+                                "override_spec",
+                                "registry_schemas",
+                            ):
+                                LOGGER.warning(
+                                    (
+                                        "Ignoring '%s' from template "
+                                        "Metadata.cfn-lint.config: this key "
+                                        "can load/execute arbitrary code and "
+                                        "is only honoured from the CLI or an "
+                                        "explicit --config-file."
+                                    ),
+                                    key,
+                                )
+                                continue
                             defaults[key] = configs[key]
 
         self._template_args = defaults

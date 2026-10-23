@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import datetime
 import fnmatch
@@ -781,20 +782,124 @@ def import_filename(pluginname, root):
     return None
 
 
+def _ast_base_identifiers(base):
+    """Yield identifier names referenced by an AST base-class expression.
+
+    Handles ``Name`` (``Foo``) and ``Attribute`` (``mod.Foo`` / ``a.b.Foo``)
+    bases, which is what rule modules in this codebase use. Call-form bases
+    like ``Foo()`` or ``Generic[T]`` fall through and yield nothing, which
+    is fine for the admission check below (that class simply doesn't count
+    as a recognised rule base).
+    """
+    if isinstance(base, ast.Name):
+        yield base.id
+    elif isinstance(base, ast.Attribute):
+        yield base.attr
+    elif isinstance(base, ast.Subscript):
+        yield from _ast_base_identifiers(base.value)
+
+
+def _module_declares_rule_subclass(
+    file_path: str,
+    rule_base_name: str = "CloudFormationLintRule",
+    trusted_module_prefixes: Sequence[str] = ("cfnlint",),
+) -> bool:
+    """Check (without executing) whether a Python source file declares a
+    class that plausibly subclasses ``rule_base_name``.
+
+    Admission rules (all applied to the parsed AST only):
+
+    * The file must parse as valid Python.
+    * It must contain at least one top-level ``class`` definition whose
+      base-class reference is either ``rule_base_name`` itself (anywhere
+      in the MRO expression) or a name imported ``from <trusted-prefix>...``
+      -- i.e. a class pulled in from the cfn-lint package tree.
+
+    This is a conservative gate for ``load_plugins``: it prevents
+    arbitrary ``.py`` files found by directory walking from being executed
+    just because they happen to live under a configured rules directory
+    (see the ``append_rules`` RCE vector). Rule files shipped by cfn-lint
+    and third-party rule packs that subclass a cfn-lint base class both
+    pass; a bare payload script with no class definitions, or one whose
+    bases come from outside the cfn-lint namespace, is rejected without
+    its module body ever running.
+    """
+    try:
+        with open(file_path, "rb") as fh:
+            source = fh.read()
+        tree = ast.parse(source, filename=file_path)
+    except (OSError, SyntaxError, ValueError):
+        return False
+
+    # Names imported from a trusted (cfnlint*) module. Any class whose
+    # declared base resolves (textually) to one of these names is treated
+    # as a candidate rule class -- the actual subclass check still happens
+    # later inside create_rules().
+    trusted_imports: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module:
+            module_name = node.module
+            if any(
+                module_name == p or module_name.startswith(p + ".")
+                for p in trusted_module_prefixes
+            ):
+                for alias in node.names:
+                    trusted_imports.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if any(
+                    alias.name == p or alias.name.startswith(p + ".")
+                    for p in trusted_module_prefixes
+                ):
+                    trusted_imports.add(alias.asname or alias.name.split(".")[0])
+
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for base in node.bases:
+            for ident in _ast_base_identifiers(base):
+                if ident == rule_base_name or ident in trusted_imports:
+                    return True
+    return False
+
+
 def load_plugins(
     directory,
     name="CloudFormationLintRule",
     modules=("cfnlint", "cfnlint.rules", "cfnlint.rules._rule"),
 ):
-    """Load plugins"""
+    """Load plugins.
+
+    Walks ``directory`` for Python source files and loads each one that
+    *statically* declares a class plausibly subclassing ``name`` (see
+    :func:`_module_declares_rule_subclass`). Files that do not declare a
+    rule class are **not** executed, so dropping an arbitrary ``.py``
+    file under a configured ``append_rules`` directory does not grant
+    code execution. The caller is still responsible for not pointing
+    ``append_rules`` at untrusted content -- a module that *does* declare
+    a rule class will have its body executed on import, which is
+    inherent to any Python plugin system.
+    """
     result = []
 
     def onerror(os_error):
         """Raise an error"""
         raise os_error
 
+    trusted_prefixes = tuple(modules) if modules else ("cfnlint",)
+
     for root, _, filenames in os.walk(directory, onerror=onerror):
         for filename in fnmatch.filter(filenames, "[A-Za-z1-9]*.py"):
+            file_path = os.path.join(root, filename)
+            if not _module_declares_rule_subclass(
+                file_path,
+                rule_base_name=name,
+                trusted_module_prefixes=trusted_prefixes,
+            ):
+                LOGGER.debug(
+                    "Skipping %s: no %s subclass declared", file_path, name
+                )
+                continue
             mod = import_filename(filename.replace(".py", ""), root)
             if mod is not None:
                 result.extend(create_rules(mod, name, modules))
