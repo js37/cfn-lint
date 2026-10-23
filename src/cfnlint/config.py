@@ -952,6 +952,21 @@ class ConfigMixIn(TemplateArgs, CliArgs, ConfigFileArgs):
         return self._get_argument_value("ignore_checks", True, True)
 
     @property
+    def ignore_checks_meta_rules(self):
+        """
+        Ignore list used when deciding whether cfn-lint's "analysis did
+        not happen" meta rules (E0000 ParseError, E0001 TransformError,
+        E0002 RuleError, E0003 ConfigError) are enabled.
+
+        The analysed template must not be able to suppress the linter's
+        own report that it was never actually analysed, so this resolves
+        the value from CLI/config-file/manual sources only -- the same
+        way ``mandatory_checks`` deliberately ignores template Metadata
+        (see ``mandatory_checks`` below).
+        """
+        return self._get_argument_value("ignore_checks", False, True)
+
+    @property
     def include_checks(self):
         results = self._get_argument_value("include_checks", True, True)
         return ["W", "E"] + results

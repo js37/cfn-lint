@@ -85,8 +85,35 @@ def _run_template_per_config(
 
     matches = cfn.transform()
     if matches:
-        if rules.is_rule_enabled(TransformError(), config):
+        # The template failed to transform, so no rule in the collection
+        # will run against it below. The template's own Metadata must not
+        # be able to suppress this "analysis did not happen" signal, so
+        # TransformError (E0001) enablement is evaluated using an ignore
+        # list that excludes template_args (see
+        # ConfigMixIn.ignore_checks_meta_rules). If an operator still
+        # chooses to ignore E0001 via CLI/config-file/manual args, emit
+        # a non-suppressible record so the template is never silently
+        # reported as clean when zero rules were executed on it.
+        transform_error = TransformError()
+        if transform_error.is_enabled(
+            include_experimental=config.include_experimental,
+            ignore_rules=config.ignore_checks_meta_rules,
+            include_rules=config.include_checks,
+            mandatory_rules=config.mandatory_checks,
+        ):
             yield from iter(matches)
+        else:
+            # Suppressed by operator config: still surface the fact that
+            # no rule ran on this template.
+            yield Match.create(
+                filename=cfn.filename or "",
+                rule=transform_error,
+                message=(
+                    "Template was not analysed: the transform failed and "
+                    "TransformError (E0001) was suppressed; no rules were "
+                    "executed against this template."
+                ),
+            )
         return
 
     if cfn.template is not None:
