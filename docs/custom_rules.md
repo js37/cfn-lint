@@ -42,7 +42,7 @@ The specified operator to be used for this rule. The supported values are define
 | == | Identical to `EQUALS` |
 | NOT_EQUALS | Checks the specified property is not equal to the value given |
 | != | Identical to `NOT_EQUALS` |
-| REGEX_MATCH | Checks the specified property matches regex given (using python `regex` module) |
+| REGEX_MATCH | Checks the specified property matches regex given (using python `regex` module). The pattern is applied with `fullmatch`, i.e. it must match the whole value - unanchored patterns such as `[a-z0-9-]+` constrain the entire value, not merely a prefix. |
 | IN | Checks the specified property is equal to or contained by the array value |
 | NOT_IN | Checks the specified property is not equal to or not contained by the array value |
 | \>= | Checks the specified property is greater than or equal to the value given |
