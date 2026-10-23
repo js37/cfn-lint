@@ -618,11 +618,28 @@ def load_resource(package, filename="us-east-1.json"):
     :param filename: filename to load
     :return: Json output of the resource laoded
     """
-    return json.loads(
-        pkg_resources.files(package)  # pylint: disable=no-member
-        .joinpath(filename)
-        .read_text(encoding="utf-8")
-    )
+    base = pkg_resources.files(package)  # pylint: disable=no-member
+    target = base.joinpath(filename)
+    # Defence in depth: refuse to read a resource whose resolved path
+    # escapes the package directory. ``joinpath`` accepts absolute paths
+    # and ``..`` segments, so a caller that forwards untrusted input
+    # (for example an override-spec patch key) could otherwise be made to
+    # read arbitrary JSON files on disk.
+    try:
+        base_resolved = os.path.realpath(str(base))
+        target_resolved = os.path.realpath(str(target))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid resource filename for package {package!r}"
+        ) from exc
+    if (
+        target_resolved != base_resolved
+        and not target_resolved.startswith(base_resolved + os.sep)
+    ):
+        raise ValueError(
+            f"Resource filename escapes package directory for {package!r}"
+        )
+    return json.loads(target.read_text(encoding="utf-8"))
 
 
 def is_custom_resource(resource_type):
