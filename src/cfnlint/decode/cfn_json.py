@@ -42,16 +42,21 @@ def check_duplicates(ordered_pairs, beg_mark, end_mark):
     """
     err = None
     mapping = dict_node({}, beg_mark, end_mark)
+    # Track the first-seen key object for each key so that, if a duplicate
+    # is later encountered, the DuplicateError can reference the original
+    # key node (preserving the error semantics of the previous O(n^2)
+    # implementation) without re-scanning ``mapping`` for every pair.
+    first_seen_keys = {}
     for key, value in ordered_pairs:
-        for m_key in mapping:
-            if m_key == key:
-                if err is None:
-                    err = DuplicateError(f'"{key}"', key)
-                    err.append(m_key)
-                else:
-                    err.append(key)
-        if key not in mapping:
+        if key in mapping:
+            if err is None:
+                err = DuplicateError(f'"{key}"', key)
+                err.append(first_seen_keys[key])
+            else:
+                err.append(key)
+        else:
             mapping[key] = value
+            first_seen_keys[key] = key
 
     if err is not None:
         raise err
