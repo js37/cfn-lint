@@ -116,7 +116,21 @@ def _run_template(
         return
 
     config.set_template_args(template)
-    cfn = Template(filename, template, config.regions, config.parameters)
+    try:
+        cfn = Template(filename, template, config.regions, config.parameters)
+    except Exception as err:  # pylint: disable=broad-except
+        # pylint: disable=import-outside-toplevel
+        from cfnlint.rules.errors import RuleError
+
+        # Template construction (e.g. context initialization) raised an
+        # unexpected error on a malformed template. Report it against this
+        # file instead of letting the exception abort the whole run.
+        yield Match.create(
+            filename=filename or "",
+            rule=RuleError(),
+            message=f"Unknown exception while processing template: {err!r}",
+        )
+        return
     yield from _dedup(_run_template_per_config(cfn, config, rules))
 
 

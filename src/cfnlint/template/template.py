@@ -98,7 +98,18 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
         except Exception as err:  # pylint: disable=broad-except
             LOGGER.info("Encountered unknown error while building graph: %s", err)
 
-        self.context = create_context_for_template(self)
+        try:
+            self.context = create_context_for_template(self)
+        except Exception as err:  # pylint: disable=broad-except
+            # Context construction runs before any rule can execute, so an
+            # unexpected error here would otherwise abort the entire lint
+            # invocation. Fall back to an empty context so rules still run
+            # and can report the underlying template error.
+            LOGGER.info(
+                "Encountered unknown error while building template context: %s",
+                err,
+            )
+            self.context = Context(regions=self.regions)
         if parameter_sets:
             self.context = self.context.evolve(parameter_sets=parameter_sets)
         self.search_deep_keys = functools.lru_cache()(self.search_deep_keys)  # type: ignore

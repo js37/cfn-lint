@@ -414,13 +414,15 @@ class Parameter(_Ref):
                 else:
                     self.default = [_strip(default)]
 
-            for allowed_value in parameter.get("AllowedValues", []):
-                if isinstance(allowed_value, str):
-                    self.allowed_values.append(
-                        [_strip(value) for value in allowed_value.split(",")]
-                    )
-                else:
-                    self.allowed_values.append([_strip(allowed_value)])
+            allowed_values = parameter.get("AllowedValues")
+            if isinstance(allowed_values, list):
+                for allowed_value in allowed_values:
+                    if isinstance(allowed_value, str):
+                        self.allowed_values.append(
+                            [_strip(value) for value in allowed_value.split(",")]
+                        )
+                    else:
+                        self.allowed_values.append([_strip(allowed_value)])
         else:
             self.default = parameter.get("Default")
             self.allowed_values = parameter.get("AllowedValues")
@@ -564,7 +566,11 @@ def _init_parameters(parameters: Any) -> dict[str, Parameter]:
     for k, v in parameters.items():
         try:
             obj[k] = Parameter(v)
-        except ValueError:
+        except Exception:  # pylint: disable=broad-except
+            # A malformed parameter (e.g. non-iterable AllowedValues on a
+            # CommaDelimitedList/List<...> parameter) must not abort context
+            # construction; the dedicated rule(s) will report the schema
+            # violation when they run.
             pass
 
     return obj
@@ -577,7 +583,10 @@ def _init_resources(resources: Any, filename: str | None = None) -> dict[str, Re
     for k, v in resources.items():
         try:
             obj[k] = Resource(v, filename)
-        except ValueError:
+        except Exception:  # pylint: disable=broad-except
+            # A malformed resource definition must not abort context
+            # construction; the dedicated rule(s) will report the schema
+            # violation when they run.
             pass
     return obj
 
