@@ -3,6 +3,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
+import bisect
 import fileinput
 import inspect
 import json
@@ -76,14 +77,14 @@ class JSONDecodeError(ValueError):
 
         errmsg = (
             f"{errors[0].message}: line {errors[0].linenumber} column"
-            f" {errors[0].linenumber} (char {pos})"
+            f" {errors[0].columnnumber} (char {pos})"
         )
         ValueError.__init__(self, errmsg)
         self.msg = errors[0].message
         self.doc = doc
         self.pos = pos
         self.lineno = errors[0].linenumber
-        self.colno = errors[0].linenumber
+        self.colno = errors[0].columnnumber
         self.matches = errors
 
     def __reduce__(self):
@@ -110,9 +111,9 @@ def build_match_from_key(message, key):
         message=message,
         filename="",
         rule=ParseError(),
-        linenumber=key.start_mark.line,
+        linenumber=key.start_mark.line + 1,
         columnnumber=key.start_mark.column + 1,
-        linenumberend=key.end_mark.line,
+        linenumberend=key.end_mark.line + 1,
         columnnumberend=key.end_mark.column + 1 + len(key),
     )
 
@@ -331,21 +332,38 @@ def count_occurrences(arr, key):
     return count
 
 
-def largest_less_than(indexes, line_num, pos):
-    """Replacement func for python str.rfind using indexes"""
-    return indexes[line_num - 1] if indexes and count_occurrences(indexes, pos) else -1
+def largest_less_than(indexes, pos, line_num=None):  # pylint: disable=unused-argument
+    """Replacement func for python str.rfind using indexes.
+
+    Returns the largest value in ``indexes`` that is strictly less than
+    ``pos``, or -1 if no such value exists. The historical ``line_num``
+    argument is retained for backwards compatibility but is ignored: the
+    search is driven solely by ``pos`` so callers cannot pass in a
+    mismatched line number and silently index the wrong newline.
+    """
+    if not indexes:
+        return -1
+    i = bisect.bisect_left(indexes, pos)
+    if i == 0:
+        return -1
+    return indexes[i - 1]
 
 
 def get_beg_end_mark(start, end, indexes):
-    """Get the Start and End Mark"""
-    beg_lineno = count_occurrences(indexes, start)
-    beg_colno = start - largest_less_than(indexes, beg_lineno, start)
-    beg_mark = Mark(beg_lineno, beg_colno)
+    """Get the Start and End Mark.
 
-    offset = 1 if len(indexes) > 1 else 0
-    end_lineno = count_occurrences(indexes, end) - offset
-    end_colno = end - largest_less_than(indexes, end_lineno, end)
-    end_mark = Mark(end_lineno, end_colno)
+    Both marks are computed independently from the character positions
+    ``start`` and ``end``. Line and column numbers are clamped to be
+    non-negative so that downstream consumers (formatters, SARIF) never
+    receive negative or inverted source positions.
+    """
+    beg_lineno = count_occurrences(indexes, start)
+    beg_colno = start - largest_less_than(indexes, start)
+    beg_mark = Mark(max(beg_lineno, 0), max(beg_colno, 0))
+
+    end_lineno = count_occurrences(indexes, end)
+    end_colno = end - largest_less_than(indexes, end)
+    end_mark = Mark(max(end_lineno, 0), max(end_colno, 0))
 
     return beg_mark, end_mark
 
