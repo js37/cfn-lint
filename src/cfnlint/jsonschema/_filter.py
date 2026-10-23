@@ -13,6 +13,7 @@ from cfnlint.helpers import (
     PSEUDOPARAMS,
     REGEX_DYN_REF,
     REGEX_DYN_REF_SPACES,
+    REGEX_SCALAR_MAX_LENGTH,
     ToPy,
     ensure_list,
 )
@@ -130,6 +131,7 @@ class FunctionFilter:
             validator.is_type(instance, "string")
             and self.validate_dynamic_references
             and list(validator.context.path.path) != ["Description"]
+            and len(instance) <= REGEX_SCALAR_MAX_LENGTH
         ):
             if REGEX_DYN_REF.findall(instance):
                 # if we are in a function we can't validate

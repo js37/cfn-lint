@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import regex as re
-
 from cfnlint.helpers import REGEX_DYN_REF
 from cfnlint.jsonschema import ValidationResult, Validator
 from cfnlint.rules.jsonschema.CfnLintKeyword import CfnLintKeyword
@@ -35,7 +33,7 @@ class Aliases(CfnLintKeyword):
         self, validator: Validator, _, instance: Any, schema: dict[str, Any]
     ) -> ValidationResult:
         if isinstance(instance, str):
-            if re.match(REGEX_DYN_REF, instance):
+            if REGEX_DYN_REF.search(instance):
                 return
             for err in validator.descend(
                 instance=instance,

@@ -13,8 +13,6 @@ from dataclasses import InitVar, dataclass, field, fields
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, Any, Deque, Iterator, Set, Tuple
 
-import regex as re
-
 from cfnlint.context._mappings import Mappings
 from cfnlint.context.conditions._conditions import Conditions
 from cfnlint.context.parameters import ParameterSet
@@ -483,7 +481,7 @@ def _nested_stack_get_atts(filename: str, template_url: str) -> None | Attribute
     if not (template_path.startswith(cwd + os.sep) or template_path == cwd):
         return None
 
-    if re.match(REGEX_DYN_REF, template_path):
+    if REGEX_DYN_REF.search(template_path):
         return None
     try:
         from cfnlint.decode import decode
