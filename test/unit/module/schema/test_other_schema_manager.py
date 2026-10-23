@@ -110,9 +110,9 @@ class TestOtherSchemaManager(BaseTestCase):
     @patch("cfnlint.schema.other_schema_manager.load_resource")
     @patch("cfnlint.schema.other_schema_manager.jsonpatch.JsonPatch")
     @patch("cfnlint.schema.other_schema_manager.sys.exit")
-    @patch("cfnlint.schema.other_schema_manager.print")
+    @patch("cfnlint.schema.other_schema_manager.LOGGER")
     def test_patch_failure(
-        self, mock_print, mock_exit, mock_json_patch, mock_load_resource
+        self, mock_logger, mock_exit, mock_json_patch, mock_load_resource
     ):
         """Test when patching a schema fails"""
         # Setup the schema to be loaded successfully
@@ -130,10 +130,11 @@ class TestOtherSchemaManager(BaseTestCase):
         # Apply the patch
         self.manager.patch(patch, "us-east-1")
 
-        # Verify that print was called with the error message
-        mock_print.assert_called_with(
-            f"Error applying patch {self.schema_patch} for "
-            f"{schema_path}: Invalid patch operation"
+        # Verify that the error was logged with only the schema path
+        # (patch body and exception detail must not be echoed to avoid
+        # content disclosure through jsonpatch error messages).
+        mock_logger.error.assert_called_with(
+            "Error applying patch for %s", schema_path
         )
 
         # Verify that sys.exit was called with exit code 1
