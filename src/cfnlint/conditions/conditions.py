@@ -260,9 +260,11 @@ class Conditions:
             # based on the provided conditions
             scenarios_attempted = 0
             if region:
-                products = itertools.starmap(
-                    self.build_scenerios_on_region,
-                    itertools.product(condition_names, [region]),
+                products = itertools.product(
+                    *itertools.starmap(
+                        self.build_scenerios_on_region,
+                        itertools.product(condition_names, [region]),
+                    )
                 )
             else:
                 products = itertools.product([True, False], repeat=len(condition_names))  # type: ignore

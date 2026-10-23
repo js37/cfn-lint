@@ -261,6 +261,59 @@ class TestConditions(TestCase):
             ],
         )
 
+    def test_build_scenarios_with_region(self):
+        """Region-filtered build_scenarios must enumerate the cross product
+        of per-condition option lists, not zip condition names against one
+        condition's options."""
+        template = decode_str(
+            """
+        Parameters:
+          Environment:
+            Type: String
+            AllowedValues: ["prod", "dev", "stage"]
+        Conditions:
+          IsUsEast1: !Equals [!Ref AWS::Region, "us-east-1"]
+          IsUsWest2: !Equals ["us-west-2", !Ref AWS::Region]
+          IsProd: !Equals [!Ref Environment, "prod"]
+        """
+        )[0]
+
+        cfn = Template("", template)
+        self.assertEqual(len(cfn.conditions._conditions), 3)
+
+        # Two region-based conditions: in us-east-1, IsUsEast1 can only be
+        # True and IsUsWest2 can only be False, so the only satisfiable
+        # scenario is {IsUsEast1: True, IsUsWest2: False} -- and both
+        # condition names must be present in the returned scenario.
+        scenarios = list(
+            cfn.conditions.build_scenarios(
+                {"IsUsEast1": None, "IsUsWest2": None}, "us-east-1"
+            )
+        )
+        self.assertListEqual(
+            scenarios,
+            [{"IsUsEast1": True, "IsUsWest2": False}],
+        )
+
+        # Mixing a region-based condition (fixed by region) with a
+        # non-region condition (free) must still return the full cross
+        # product of satisfiable assignments and must include every
+        # condition name in each scenario.
+        mixed = list(
+            cfn.conditions.build_scenarios(
+                {"IsUsEast1": None, "IsProd": None}, "us-east-1"
+            )
+        )
+        self.assertEqual(len(mixed), 2)
+        for scenario in mixed:
+            self.assertIn("IsUsEast1", scenario)
+            self.assertIn("IsProd", scenario)
+            self.assertTrue(scenario["IsUsEast1"])
+        self.assertEqual(
+            sorted(s["IsProd"] for s in mixed),
+            [False, True],
+        )
+
     def test_test_condition(self):
         """Get condition and test"""
         template = decode_str(
