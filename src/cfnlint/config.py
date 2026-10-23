@@ -727,8 +727,13 @@ class TemplateArgs:
             configs = cfn_lint.get("config", {}) if isinstance(cfn_lint, dict) else {}
 
             if isinstance(configs, dict):
+                # Note: ``append_rules`` is intentionally excluded from this
+                # allow-list. ``append_rules`` is handed to the Python plugin
+                # loader (``cfnlint.helpers.load_plugins`` / ``exec_module``)
+                # and must never be sourceable from a (potentially untrusted)
+                # template. Any other setting that can cause module import or
+                # code execution must be withheld here for the same reason.
                 for key, value in {
-                    "append_rules": list,
                     "configure_rules": dict,
                     "custom_rules": str,
                     "ignore_bad_template": bool,
@@ -785,11 +790,18 @@ def _merge_configs(
         return merged_list
 
     elif isinstance(cli_value, dict):
-        merged_dict = cli_value.copy()
+        # For dicts, ``update`` makes the last writer win. Apply the less
+        # trusted layers (template, then config file) first so that the
+        # operator-supplied CLI values override them, and finally apply
+        # the manually supplied (API caller) values which take the highest
+        # precedence. This preserves the documented precedence order
+        # (CLI/manual > config file > template) even when merging dicts.
+        merged_dict: dict = {}
         if isinstance(template_value, dict):
             merged_dict.update(template_value)
         if isinstance(file_value, dict):
             merged_dict.update(file_value)
+        merged_dict.update(cli_value)
         if isinstance(manual_value, dict):
             merged_dict.update(manual_value)
         return merged_dict
@@ -932,8 +944,20 @@ class ConfigMixIn(TemplateArgs, CliArgs, ConfigFileArgs):
         if arg_name != "merge_configs":
             if self.merge_configs:
                 if isinstance(cli_value, (list, dict)):
+                    # Honour the trust gates even when merging: only let the
+                    # template layer contribute when the caller marked the
+                    # setting as template-readable (``is_template``), and only
+                    # let the config-file layer contribute when the caller
+                    # marked it as file-readable (``is_config_file``). Without
+                    # this gating, ``_merge_configs`` would otherwise lift
+                    # values out of an untrusted ``Metadata.cfn-lint.config``
+                    # into settings that were deliberately denied to it
+                    # (e.g. ``append_rules``).
                     return _merge_configs(
-                        cli_value, template_value, file_value, manual_value
+                        cli_value,
+                        template_value if is_template else None,
+                        file_value if is_config_file else None,
+                        manual_value,
                     )
 
         # return individual items

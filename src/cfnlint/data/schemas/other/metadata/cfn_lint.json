@@ -3,12 +3,6 @@
   "config": {
    "additionalProperties": false,
    "properties": {
-    "append_rules": {
-     "items": {
-      "type": "string"
-     },
-     "type": "array"
-    },
     "configure_rules": {
      "type": "object"
     },
