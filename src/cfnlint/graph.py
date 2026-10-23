@@ -121,15 +121,56 @@ class Graph:
         self._add_subs(cfn)
 
     def get_cycles(self, cfn):
-        """Return all resource pairs that have a cycle in them"""
+        """Return all resource pairs that have a cycle in them
+
+        Uses a single strongly-connected-components pass over the graph so
+        the cost is O(V + E) regardless of how many resources the template
+        declares. ``networkx.find_cycle`` is then invoked at most once per
+        cyclic component (never once per resource), which also prevents a
+        template-sized multigraph from amplifying work quadratically.
+        """
+        resources = cfn.template.get("Resources", {})
+        if not isinstance(resources, dict) or not resources:
+            return []
         result = []
-        for starting_resource in cfn.template.get("Resources", {}):
-            try:
-                for edge in list(networkx.find_cycle(self.graph, starting_resource)):
-                    if edge not in result:
+        seen_edges = set()
+        for component in networkx.strongly_connected_components(self.graph):
+            # A component is cyclic if it has more than one node, or if the
+            # single node has a self-loop.
+            if len(component) <= 1:
+                node = next(iter(component))
+                if not self.graph.has_edge(node, node):
+                    continue
+            # Only consider the subgraph of this component so ``find_cycle``
+            # cannot wander into non-cyclic parts of the graph.
+            subgraph = self.graph.subgraph(component)
+            # Walk the component repeatedly, peeling off one cycle at a time
+            # by removing an edge of each discovered cycle until no more
+            # cycles remain in it. This keeps the cost bounded by the
+            # number of edges in the component, not by the number of
+            # resources in the template.
+            working = networkx.MultiDiGraph(subgraph)
+            while True:
+                try:
+                    cycle = list(networkx.find_cycle(working))
+                except networkx.NetworkXNoCycle:
+                    break
+                for edge in cycle:
+                    key = edge[:2]
+                    if key not in seen_edges:
+                        seen_edges.add(key)
                         result.append(edge)
-            except networkx.NetworkXNoCycle:
-                continue
+                # Remove the first edge of the discovered cycle so the
+                # next iteration finds a different one (if any remain in
+                # this component).
+                first = cycle[0]
+                try:
+                    if len(first) >= 3:
+                        working.remove_edge(first[0], first[1], first[2])
+                    else:
+                        working.remove_edge(first[0], first[1])
+                except (networkx.NetworkXError, KeyError):
+                    break
         return result
 
     def _add_parameters(self, cfn: Any) -> None:
@@ -284,6 +325,21 @@ class Graph:
         self.graph.add_node(node_id, **attr)
 
     def _add_edge(self, source_id, target_id, source_path, settings):
+        # Collapse duplicate dependencies so that attacker-controlled
+        # repetitions (e.g. ``DependsOn: [R0, R0, R0, ...]`` or many
+        # ``Ref``s to the same target) cannot inflate the edge count of
+        # the MultiDiGraph. An edge is considered a duplicate when a
+        # parallel edge already exists between the same endpoints with
+        # the same source path and visual settings.
+        existing = self.graph.get_edge_data(source_id, target_id)
+        if existing:
+            for data in existing.values():
+                if (
+                    data.get("source_paths") == source_path
+                    and data.get("label") == settings.label
+                    and data.get("color") == settings.color
+                ):
+                    return
         self.graph.add_edge(
             source_id,
             target_id,
