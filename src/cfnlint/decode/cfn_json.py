@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import sys
+from array import array
 from json.decoder import WHITESPACE  # type: ignore
 from json.decoder import BACKSLASH, STRINGCHUNK, WHITESPACE_STR  # type: ignore
 from json.scanner import NUMBER_RE
@@ -309,8 +310,20 @@ def py_make_scanner(context):
 
 
 def find_indexes(s, ch="\n"):
-    """Finds all instances of given char and returns list of indexes"""
-    return [i for i, ltr in enumerate(s) if ltr == ch]
+    """Finds all instances of given char and returns a compact index table.
+
+    The table is used by ``count_occurrences`` / ``largest_less_than`` to map
+    document offsets to line/column numbers without having to re-scan the
+    whole document for every mark. Storing the offsets in an ``array('L')``
+    rather than a Python ``list`` of boxed ``int`` objects keeps the
+    per-entry footprint at ``itemsize`` bytes (typically 8) instead of the
+    ~36 bytes a list slot plus a CPython ``int`` would consume, which
+    materially reduces heap usage when an untrusted template contains a
+    large number of newlines. The returned object still supports ``len``,
+    integer indexing and ``<=``/``<`` comparisons on its elements, so the
+    binary-search helpers below work unchanged.
+    """
+    return array("L", (i for i, ltr in enumerate(s) if ltr == ch))
 
 
 def count_occurrences(arr, key):
@@ -393,7 +406,7 @@ class CfnJSONDecoder(json.JSONDecoder):
         self.memo = {}
         self.object_pairs_hook = check_duplicates
         self.scan_once = py_make_scanner(self)
-        self.newline_indexes = []
+        self.newline_indexes = array("L")
 
     def decode(self, s, _w=WHITESPACE.match):
         """Overridden to retrieve indexes"""
