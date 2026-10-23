@@ -235,7 +235,12 @@ class Runner:
                 if not template_config:
                     yield from matches
                     continue
-                yield from run_template_by_file_paths(template_config, self.rules)
+                try:
+                    yield from run_template_by_file_paths(
+                        template_config, self.rules
+                    )
+                except ValueError as e:
+                    yield Match(str(e), ConfigError(), None)
 
             return
 
