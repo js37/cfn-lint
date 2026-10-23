@@ -24,6 +24,12 @@ from cfnlint.jsonschema import ValidationError, Validator
 from cfnlint.jsonschema._typing import ResolutionResult
 from cfnlint.jsonschema._utils import equal
 
+# Compile once at module level and use a negated character class instead of
+# `.*?` so matching is linear in the length of the input (CWE-1333). The
+# previous per-call compilation of `(\${([^!].*?)})` backtracked quadratically
+# on long runs of unterminated `${` openers.
+_SUB_REGEX = re.compile(r"(\${\s*([^!{}\s][^{}]*?)\s*})")
+
 
 def unresolvable(validator: Validator, instance: Any) -> ResolutionResult:
     return
@@ -411,8 +417,6 @@ def _sub_parameter_expansion(
 
 
 def _sub_string(validator: Validator, string: str) -> ResolutionResult:
-    sub_regex = re.compile(r"(\${([^!].*?)})")
-
     def _replace(matchobj):
         nonlocal validator
         for value, c in validator.context.ref_value(matchobj.group(2).strip()):
@@ -428,7 +432,7 @@ def _sub_string(validator: Validator, string: str) -> ResolutionResult:
         raise ValueError(f"No matches for {matchobj.group(2)!r}")
 
     try:
-        yield re.sub(sub_regex, _replace, string), validator, None
+        yield _SUB_REGEX.sub(_replace, string), validator, None
     except ValueError:
         return
 
