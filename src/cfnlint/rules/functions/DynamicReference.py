@@ -79,6 +79,7 @@ class DynamicReference(BaseFn):
             "E1051": None,
             "W1051": None,
             "E1027": None,
+            "E1052": None,
         }
 
     def _clean_errors(self, err: ValidationError) -> ValidationError:
@@ -116,6 +117,9 @@ class DynamicReference(BaseFn):
 
             if parts[1] == "ssm":
                 evolved = validator.evolve(schema=_ssm)
+                rule = self.child_rules["E1052"]
+                if rule and hasattr(rule, "validate"):
+                    yield from rule.validate(validator, {}, v, schema)
             elif parts[1] == "ssm-secure":
                 evolved = validator.evolve(schema=_ssm)
                 rule = self.child_rules["E1027"]
