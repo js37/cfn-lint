@@ -8,8 +8,13 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from cfnlint.jsonschema import Validator
-from cfnlint.rules.functions._BaseFn import BaseFn, all_types
+from cfnlint.helpers import REGEX_DYN_REF
+from cfnlint.jsonschema import ValidationResult, Validator
+from cfnlint.rules.functions._BaseFn import (
+    BaseFn,
+    all_types,
+    validate_dynamic_reference_location,
+)
 
 
 class Select(BaseFn):
@@ -27,7 +32,12 @@ class Select(BaseFn):
             all_types,
             resolved_rule="W1035",
         )
-        self.fn_select = self.validate
+        self.child_rules.update(
+            {
+                "E1027": None,
+                "E1051": None,
+            }
+        )
 
     def schema(self, validator: Validator, instance: Any) -> dict[str, Any]:
         # When the list is hardcoded its length is fixed at authoring time
@@ -49,3 +59,32 @@ class Select(BaseFn):
             index_schema = schema["cfnContext"]["schema"][branch]["prefixItems"][0]
             index_schema["cfnContext"]["schema"]["maximum"] = maximum
         return schema
+
+    def fn_select(
+        self, validator: Validator, s: Any, instance: Any, schema: Any
+    ) -> ValidationResult:
+        yield from self.validate(validator, s, instance, schema)
+
+        # Dispatch dynamic-reference location rules on literal string items
+        # of ``Fn::Select``'s list argument. ``_filter.filter`` suppresses
+        # the ``dynamicReference`` keyword inside intrinsic functions, so
+        # wrapping a reference in ``Fn::Select`` would otherwise silence
+        # E1027 / E1051.
+        _, value = self.key_value(instance)
+        if not isinstance(value, list) or len(value) != 2:
+            return
+        items = value[1]
+        if not isinstance(items, list):
+            return
+        location_validator = validator.evolve(
+            context=validator.context.evolve(
+                path=validator.context.path.descend(path="Fn::Select")
+            )
+        )
+        for item in items:
+            if isinstance(item, str) and REGEX_DYN_REF.findall(item):
+                for err in validate_dynamic_reference_location(
+                    location_validator, self.child_rules, item, schema
+                ):
+                    err.path.append("Fn::Select")
+                    yield err

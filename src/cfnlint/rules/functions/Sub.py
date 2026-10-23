@@ -12,7 +12,7 @@ import regex as re
 
 from cfnlint.helpers import REGEX_SUB_PARAMETERS, is_function
 from cfnlint.jsonschema import ValidationError, ValidationResult, Validator
-from cfnlint.rules.functions._BaseFn import BaseFn
+from cfnlint.rules.functions._BaseFn import BaseFn, validate_dynamic_reference_location
 
 
 class Sub(BaseFn):
@@ -35,6 +35,8 @@ class Sub(BaseFn):
                 "W1019": None,
                 "W1020": None,
                 "W1051": None,
+                "E1027": None,
+                "E1051": None,
             }
         )
 
@@ -131,9 +133,24 @@ class Sub(BaseFn):
                 path=validator.context.path.descend(path=key)
             )
         )
-        for _, rule in self.child_rules.items():
+        # E1027 / E1051 are location-correctness rules for dynamic
+        # references. They are normally reached as child rules of the
+        # ``dynamicReference`` keyword, but that keyword is suppressed by
+        # ``_filter.filter`` whenever the value is nested in an intrinsic
+        # function. Dispatch them here so wrapping a reference in
+        # ``Fn::Sub`` does not silence them.
+        location_rule_ids = {"E1027", "E1051"}
+        for rule_id, rule in self.child_rules.items():
+            if rule_id in location_rule_ids:
+                continue
             if rule and hasattr(rule, "validate"):
                 for err in rule.validate(value_validator, s, value, schema):
                     err.path.append("Fn::Sub")
                     err.rule = rule
                     yield err
+        if isinstance(value, str):
+            for err in validate_dynamic_reference_location(
+                value_validator, self.child_rules, value, schema
+            ):
+                err.path.append("Fn::Sub")
+                yield err

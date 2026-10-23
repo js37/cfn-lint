@@ -8,11 +8,51 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Tuple
 
-from cfnlint.helpers import ToPy, ensure_list, is_function, is_types_compatible
+from cfnlint.helpers import (
+    REGEX_DYN_REF,
+    ToPy,
+    ensure_list,
+    is_function,
+    is_types_compatible,
+)
 from cfnlint.jsonschema import ValidationError, ValidationResult, Validator
 from cfnlint.rules.jsonschema.CfnLintJsonSchema import CfnLintJsonSchema, SchemaDetails
 from cfnlint.schema import OTHER_SCHEMA_MANAGER
 from cfnlint.schema.resolver import RefResolver
+
+
+def validate_dynamic_reference_location(
+    validator: Validator,
+    child_rules: dict,
+    instance: Any,
+    schema: Any,
+) -> ValidationResult:
+    """Dispatch E1027 / E1051 for each ``{{resolve:...}}`` occurrence found
+    in ``instance`` when the dynamic reference is wrapped by an intrinsic
+    function (``Fn::Sub``, ``Fn::Join``, ``Fn::Base64``, ``Fn::Select``).
+
+    ``cfnlint.jsonschema._filter.filter`` skips the ``dynamicReference``
+    keyword whenever the current path is inside an intrinsic function
+    (other than ``Fn::If``), so the location-correctness rules E1027
+    (ssm-secure) and E1051 (secretsmanager) never run through the normal
+    path for wrapped references. This helper re-enforces the allow-list
+    directly from the host function rule so wrappers don't silence the
+    check.
+    """
+    if not isinstance(instance, str):
+        return
+    for v in REGEX_DYN_REF.findall(instance):
+        parts = v.split(":")
+        if len(parts) < 2:
+            continue
+        if parts[1] == "ssm-secure":
+            rule = child_rules.get("E1027")
+            if rule and hasattr(rule, "validate"):
+                yield from rule.validate(validator, {}, v, schema)
+        elif parts[1] == "secretsmanager":
+            rule = child_rules.get("E1051")
+            if rule and hasattr(rule, "validate"):
+                yield from rule.validate(validator, {}, v, schema)
 
 all_types = ("array", "boolean", "integer", "number", "object", "string")
 singular_types = ("boolean", "integer", "number", "string")

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from cfnlint.helpers import REGEX_DYN_REF
 from cfnlint.jsonschema import ValidationResult
 from cfnlint.jsonschema.protocols import Validator
-from cfnlint.rules.functions._BaseFn import BaseFn
+from cfnlint.rules.functions._BaseFn import BaseFn, validate_dynamic_reference_location
 
 
 class Join(BaseFn):
@@ -30,6 +31,8 @@ class Join(BaseFn):
         self.child_rules.update(
             {
                 "I1022": None,
+                "E1027": None,
+                "E1051": None,
             }
         )
 
@@ -43,8 +46,35 @@ class Join(BaseFn):
         if errs:
             yield from iter(errs)
 
-        for rule in self.child_rules.values():
+        for rule_id, rule in self.child_rules.items():
+            if rule_id in {"E1027", "E1051"}:
+                continue
             if rule is None or not hasattr(rule, "validate"):
                 continue
 
             yield from rule.validate(validator, s, instance, schema)
+
+        # Dispatch dynamic-reference location rules on each literal string
+        # item of ``Fn::Join``'s value list. ``_filter.filter`` suppresses
+        # the ``dynamicReference`` keyword inside intrinsic functions, so
+        # wrapping a reference such as ``{{resolve:ssm-secure:...}}`` in
+        # ``Fn::Join`` would otherwise silence E1027 / E1051.
+        _, value = self.key_value(instance)
+        if isinstance(value, list) and len(value) == 2:
+            items = value[1]
+            if isinstance(items, list):
+                location_validator = validator.evolve(
+                    context=validator.context.evolve(
+                        path=validator.context.path.descend(path="Fn::Join")
+                    )
+                )
+                for item in items:
+                    if isinstance(item, str) and REGEX_DYN_REF.findall(item):
+                        for err in validate_dynamic_reference_location(
+                            location_validator,
+                            self.child_rules,
+                            item,
+                            schema,
+                        ):
+                            err.path.append("Fn::Join")
+                            yield err
