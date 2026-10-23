@@ -1409,6 +1409,60 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
         directives = template.get_directives()
         self.assertDictEqual(directives, {"E3012": ["goodMetadata"]})
 
+    def test_get_directives_malformed_cfn_lint(self):
+        """get_directives must not raise on malformed Metadata.cfn-lint shapes."""
+        template_yaml = {
+            "Resources": {
+                "stringCfnLint": {
+                    "Metadata": {"cfn-lint": "off"},
+                    "Type": "AWS::S3::Bucket",
+                },
+                "listCfnLint": {
+                    "Metadata": {"cfn-lint": ["E0000"]},
+                    "Type": "AWS::S3::Bucket",
+                },
+                "stringConfig": {
+                    "Metadata": {"cfn-lint": {"config": "x"}},
+                    "Type": "AWS::S3::Bucket",
+                },
+                "scalarIgnoreChecks": {
+                    "Metadata": {"cfn-lint": {"config": {"ignore_checks": 5}}},
+                    "Type": "AWS::S3::Bucket",
+                },
+                "mixedIgnoreChecks": {
+                    "Metadata": {
+                        "cfn-lint": {
+                            "config": {"ignore_checks": [1, "E0000", None]}
+                        }
+                    },
+                    "Type": "AWS::S3::Bucket",
+                },
+                "goodMetadata": {
+                    "Metadata": {
+                        "cfn-lint": {"config": {"ignore_checks": ["E3012"]}}
+                    },
+                    "Type": "AWS::S3::Bucket",
+                },
+            }
+        }
+
+        template = Template(
+            "test.yaml",
+            cfn_yaml.loads(
+                json.dumps(
+                    template_yaml, sort_keys=True, indent=4, separators=(",", ": ")
+                )
+            ),
+        )
+        directives = template.get_directives()
+        self.assertDictEqual(
+            directives,
+            {
+                "E0000": ["mixedIgnoreChecks"],
+                "E3012": ["goodMetadata"],
+            },
+        )
+
     def test_is_cdk_bad_type(self):
         template = {
             "Resources": {
