@@ -3,6 +3,8 @@ Resources:
     Type: AWS::CDK::Metadata
   Instance:
     Type: AWS::EC2::Subnet
+    Metadata:
+      aws:asset:path: asset.abc123
     Properties:
       VpcId: vpc-1234567
       AvailabilityZone: us-east-1a

@@ -1427,6 +1427,9 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
         self.assertFalse(template.is_cdk_template())
 
     def test_is_cdk_metadata_resource_type(self):
+        # A bare AWS::CDK::Metadata resource is no longer sufficient on its
+        # own: it must be corroborated by aws:asset:* metadata on another
+        # resource to count as a CDK-synthesized template.
         template = Template(
             "test.yaml",
             {
@@ -1438,10 +1441,11 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
                 },
             },
         )
-        self.assertTrue(template.is_cdk_template())
+        self.assertFalse(template.is_cdk_template())
 
     def test_is_cdk_metadata_logical_id(self):
-        # CDKMetadata logical ID with a non-CDK type still signals CDK.
+        # A resource named CDKMetadata that is not an AWS::CDK::Metadata type
+        # and lacks aws:asset:* metadata is no longer treated as CDK.
         template = Template(
             "test.yaml",
             {
@@ -1452,10 +1456,11 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
                 },
             },
         )
-        self.assertTrue(template.is_cdk_template())
+        self.assertFalse(template.is_cdk_template())
 
     def test_is_cdk_path_metadata(self):
-        # Covers analyticsReporting: false (no AWS::CDK::Metadata resource).
+        # A single aws:cdk:path metadata entry on an unrelated resource is
+        # forgeable and no longer sufficient to classify the template as CDK.
         template = Template(
             "test.yaml",
             {
@@ -1469,7 +1474,49 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
                 },
             },
         )
+        self.assertFalse(template.is_cdk_template())
+
+    def test_is_cdk_requires_both_signals(self):
+        # Both an AWS::CDK::Metadata resource and aws:asset:* metadata on at
+        # least one resource must be present for the stronger CDK detection.
+        template = Template(
+            "test.yaml",
+            {
+                "Resources": {
+                    "CDKMetadata": {
+                        "Type": "AWS::CDK::Metadata",
+                        "Properties": {"Analytics": "v2:some-data"},
+                    },
+                    "AssetBackedFn": {
+                        "Type": "AWS::Lambda::Function",
+                        "Metadata": {
+                            "aws:cdk:path": "Stack/Fn/Resource",
+                            "aws:asset:path": "asset.abc123",
+                            "aws:asset:property": "Code",
+                        },
+                    },
+                },
+            },
+        )
         self.assertTrue(template.is_cdk_template())
+
+    def test_is_cdk_asset_metadata_alone_is_not_enough(self):
+        # aws:asset:* metadata without an AWS::CDK::Metadata resource is not
+        # sufficient on its own.
+        template = Template(
+            "test.yaml",
+            {
+                "Resources": {
+                    "AssetBackedFn": {
+                        "Type": "AWS::Lambda::Function",
+                        "Metadata": {
+                            "aws:asset:path": "asset.abc123",
+                        },
+                    },
+                },
+            },
+        )
+        self.assertFalse(template.is_cdk_template())
 
     def test_is_cdk_bad_resources(self):
         template = {

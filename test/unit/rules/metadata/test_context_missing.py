@@ -118,13 +118,16 @@ class TestContextMissing(BaseTestCase):
             "      Analytics: v2:some-data\n"
             "  UserQueue:\n"
             "    Type: AWS::SQS::Queue\n"
+            "    Metadata:\n"
+            "      aws:asset:path: asset.abc123\n"
             "  UserTopic:\n"
             "    Type: AWS::SNS::Topic\n"
         )
         self.assertEqual([], match(missing_rule(), template))
 
-    def test_cdk_template_without_metadata_resource_is_skipped(self):
-        # Covers analyticsReporting: false (no AWS::CDK::Metadata, has aws:cdk:path).
+    def test_cdk_template_without_metadata_resource_is_not_skipped(self):
+        # Without an AWS::CDK::Metadata resource, aws:cdk:path alone is
+        # author-forgeable and no longer silences the rule template-wide.
         template = (
             "Resources:\n"
             "  UserQueue:\n"
@@ -136,7 +139,7 @@ class TestContextMissing(BaseTestCase):
             "    Metadata:\n"
             "      aws:cdk:path: Stack/UserTopic/Resource\n"
         )
-        self.assertEqual([], match(missing_rule(), template))
+        self.assertNotEqual([], match(missing_rule(), template))
 
     def test_ignore_checks_on_one_resource_preserves_aggregate_for_others(self):
         template = (

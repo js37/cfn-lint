@@ -163,9 +163,25 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
     def is_cdk_template(self) -> bool:
         """Check if the template was created by the AWS Cloud Development Kit (CDK).
 
-        Detected via the AWS::CDK::Metadata resource type, the CDKMetadata
-        logical ID, or any resource carrying an aws:cdk:path metadata entry
-        (covers stacks synthesized with analyticsReporting disabled).
+        A CDK-synthesized template is identified by requiring two independent
+        signals, both of which the CDK CLI emits for every synth and neither of
+        which is a single, forgeable marker on an unrelated resource:
+
+        * at least one resource of ``Type: AWS::CDK::Metadata`` (CDK's own
+          analytics/bootstrap resource), AND
+        * at least one resource whose ``Metadata`` dict contains an
+          ``aws:asset:*`` key (CDK's asset-publishing metadata).
+
+        The older single-signal heuristic (any ``aws:cdk:path`` metadata entry,
+        or any resource logically named ``CDKMetadata``) is intentionally no
+        longer sufficient on its own: those markers are author-controlled and
+        trivially forgeable, and they let an untrusted template silence rules
+        template-wide without going through the operator-visible
+        ``ignore_checks`` / ``mandatory_checks`` configuration channel.
+
+        When the stronger signal is observed, an INFO log line is emitted so
+        operators can see that CDK detection suppressed applicability of the
+        rules that gate on this helper.
 
         Returns:
             bool: True if the template was created by CDK, False otherwise.
@@ -174,17 +190,33 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
         if not isinstance(resources, dict):
             return False
 
-        for logical_id, properties in resources.items():
+        has_cdk_metadata_resource = False
+        has_cdk_asset_metadata = False
+        for _, properties in resources.items():
             if not isinstance(properties, dict):
                 continue
             resource_type = properties.get("Type")
-            if isinstance(resource_type, str) and resource_type == "AWS::CDK::Metadata":
-                return True
-            if str(logical_id) == "CDKMetadata":
-                return True
+            if (
+                isinstance(resource_type, str)
+                and resource_type == "AWS::CDK::Metadata"
+            ):
+                has_cdk_metadata_resource = True
             metadata = properties.get("Metadata")
-            if isinstance(metadata, dict) and "aws:cdk:path" in metadata:
-                return True
+            if isinstance(metadata, dict):
+                for key in metadata.keys():
+                    if isinstance(key, str) and key.startswith("aws:asset:"):
+                        has_cdk_asset_metadata = True
+                        break
+            if has_cdk_metadata_resource and has_cdk_asset_metadata:
+                break
+
+        if has_cdk_metadata_resource and has_cdk_asset_metadata:
+            LOGGER.info(
+                "CDK template detected (AWS::CDK::Metadata resource and "
+                "aws:asset:* metadata present); rules that gate on "
+                "is_cdk_template() will be suppressed for this template."
+            )
+            return True
 
         return False
 
