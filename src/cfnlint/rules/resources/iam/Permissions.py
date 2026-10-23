@@ -39,10 +39,29 @@ class Permissions(CfnLintKeyword):
     def validate(
         self, validator: Validator, _, instance: Any, schema: dict[str, Any]
     ) -> ValidationResult:
-        # Escape validation when using SAM transforms as a result of
-        # https://github.com/aws/serverless-application-model/issues/3633
+        # Escape validation only for policies attached to SAM-native
+        # (``AWS::Serverless::*``) resources when the SAM transform is
+        # declared, because the SAM translator synthesises those policies
+        # from policy templates whose action lists cfn-lint may not know
+        # about (see
+        # https://github.com/aws/serverless-application-model/issues/3633).
+        # The escape intentionally does NOT cover hand-written raw-CFN
+        # policy resources (``AWS::IAM::Policy``, ``AWS::IAM::Role``,
+        # ``AWS::IAM::ManagedPolicy``, ``AWS::S3::BucketPolicy``,
+        # ``AWS::SQS::QueuePolicy``, ``AWS::SNS::TopicPolicy``): a
+        # template-level ``Transform`` declaration must not silently
+        # disable IAM action validation (including the resource-type
+        # service-scope check below) for those author-controlled
+        # policies.
         if validator.cfn.has_serverless_transform():
-            return
+            cfn_path = validator.context.path.cfn_path
+            if len(cfn_path) >= 2:
+                resource_type = cfn_path[1]
+                if (
+                    isinstance(resource_type, str)
+                    and resource_type.startswith("AWS::Serverless::")
+                ):
+                    return
 
         actions = ensure_list(instance)
 
