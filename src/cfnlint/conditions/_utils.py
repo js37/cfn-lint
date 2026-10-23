@@ -40,6 +40,41 @@ def _make_hashable(obj: Any) -> Any:  # type: ignore # Actual return is Hashable
     return obj
 
 
+def _typed_repr(obj: Any) -> str:
+    """Return a canonical string representation that keeps types distinct.
+
+    Python treats ``1``, ``1.0`` and ``True`` as equal (and ``0`` / ``0.0`` /
+    ``False`` likewise), so any cache or hash that keys on the raw value or
+    on a tuple containing one conflates them. ``_typed_repr`` prefixes
+    scalars with their type name so the resulting string is unique per
+    (type, value) pair and safe to use as a cache key or hash input.
+    """
+    if isinstance(obj, bool):
+        return f"bool:{obj}"
+    if isinstance(obj, int):
+        return f"int:{obj}"
+    if isinstance(obj, float):
+        return f"float:{obj!r}"
+    if obj is None:
+        return "none:None"
+    if isinstance(obj, str):
+        return f"str:{obj}"
+    if isinstance(obj, tuple):
+        return "tuple:(" + ",".join(_typed_repr(v) for v in obj) + ")"
+    if isinstance(obj, dict):
+        items = sorted(obj.items())
+        return (
+            "dict:{"
+            + ",".join(f"{_typed_repr(k)}={_typed_repr(v)}" for k, v in items)
+            + "}"
+        )
+    if isinstance(obj, list):
+        return "list:[" + ",".join(_typed_repr(v) for v in obj) + "]"
+    if hasattr(obj, "_value"):
+        return _typed_repr(obj._value)
+    return f"{type(obj).__name__}:{obj!r}"
+
+
 # Cache the hash calculation
 @functools.lru_cache(maxsize=16384)  # Increased from 4096
 def _cached_hash(hashable_obj: Hashable) -> str:
@@ -64,15 +99,21 @@ def get_hash(o: Any) -> str:
     converting the object to a hashable representation before hashing.
     This ensures that identical content always produces the same hash,
     regardless of object identity.
-    """
-    # For simple hashable types, use direct hashing
-    if isinstance(o, (str, int, float, bool, type(None))):
-        return _cached_hash(o)
 
-    # Convert to hashable and compute hash
+    The ``lru_cache`` on ``_cached_hash`` keys on Python ``==``/``hash``
+    which treats ``1``, ``1.0`` and ``True`` (and ``0`` / ``0.0`` /
+    ``False``) as equal, so caching on the raw hashable structure would
+    return the same digest for semantically different inputs. Instead we
+    serialise ``o`` to a type-tagged string via ``_typed_repr`` and cache
+    on that, which keeps bool/int/float values distinct.
+    """
+    # For simple hashable types, preserve the exact Python type in the key
+    if isinstance(o, (str, int, float, bool, type(None))):
+        return _cached_hash(_typed_repr(o))
+
+    # Convert to hashable and compute hash on a type-tagged serialisation
     try:
-        hashable = _make_hashable(o)
-        return _cached_hash(hashable)
+        return _cached_hash(_typed_repr(o))
     except Exception:  # pylint: disable=broad-except
         # Fallback to original method if conversion fails
         return hashlib.sha1(
