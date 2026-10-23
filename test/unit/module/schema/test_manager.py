@@ -324,9 +324,12 @@ class TestAutoDownloadOnMissingSchemas(BaseTestCase):
 
     @patch("cfnlint.schema.manager.ProviderSchemaManager.update")
     def test_auto_downloads_when_no_providers(self, mock_update):
-        """When no provider files exist, update is called automatically"""
+        """When no provider files exist and the auto-update opt-in is set,
+        update is called automatically."""
+        import os
         import tempfile
         from pathlib import Path
+        from unittest.mock import patch as _patch
 
         with tempfile.TemporaryDirectory() as tmpdir:
             providers_dir = Path(tmpdir) / "providers"
@@ -335,8 +338,37 @@ class TestAutoDownloadOnMissingSchemas(BaseTestCase):
             self.manager._providers_dir = providers_dir
             self.manager._provider_schema_modules = {}
 
-            self.manager._load_provider_module("us-east-1")
+            with _patch.dict(
+                os.environ, {"CFN_LINT_SCHEMAS_AUTO_UPDATE": "1"}, clear=False
+            ):
+                self.manager._load_provider_module("us-east-1")
             mock_update.assert_called_once_with(force=False)
+
+    @patch("cfnlint.schema.manager.ProviderSchemaManager.update")
+    def test_no_auto_download_without_opt_in(self, mock_update):
+        """Without CFN_LINT_SCHEMAS_AUTO_UPDATE set, an implicit network
+        install is never performed during an ordinary lint (CWE-1214)."""
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch as _patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            providers_dir = Path(tmpdir) / "providers"
+            providers_dir.mkdir()
+
+            self.manager._providers_dir = providers_dir
+            self.manager._provider_schema_modules = {}
+
+            # Ensure the opt-in is NOT set regardless of host env.
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k != "CFN_LINT_SCHEMAS_AUTO_UPDATE"
+            }
+            with _patch.dict(os.environ, env, clear=True):
+                self.manager._load_provider_module("us-east-1")
+            mock_update.assert_not_called()
 
     @patch("cfnlint.schema.manager.ProviderSchemaManager.update")
     def test_no_auto_download_when_providers_exist(self, mock_update):
