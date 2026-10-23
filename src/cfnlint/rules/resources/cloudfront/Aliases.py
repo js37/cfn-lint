@@ -9,7 +9,7 @@ from typing import Any
 
 import regex as re
 
-from cfnlint.helpers import REGEX_DYN_REF
+from cfnlint.helpers import has_dynamic_reference
 from cfnlint.jsonschema import ValidationResult, Validator
 from cfnlint.rules.jsonschema.CfnLintKeyword import CfnLintKeyword
 
@@ -35,7 +35,7 @@ class Aliases(CfnLintKeyword):
         self, validator: Validator, _, instance: Any, schema: dict[str, Any]
     ) -> ValidationResult:
         if isinstance(instance, str):
-            if re.match(REGEX_DYN_REF, instance):
+            if has_dynamic_reference(instance):
                 return
             for err in validator.descend(
                 instance=instance,

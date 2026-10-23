@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, Any, Iterator, Sequence, Tuple
 from cfnlint.helpers import (
     FUNCTIONS,
     PSEUDOPARAMS,
-    REGEX_DYN_REF,
     REGEX_DYN_REF_SPACES,
     ToPy,
     ensure_list,
+    has_dynamic_reference,
 )
 
 if TYPE_CHECKING:
@@ -131,7 +131,12 @@ class FunctionFilter:
             and self.validate_dynamic_references
             and list(validator.context.path.path) != ["Description"]
         ):
-            if REGEX_DYN_REF.findall(instance):
+            # ``has_dynamic_reference`` is strictly linear in ``len(instance)``
+            # (uses ``str.find`` only). This avoids a ReDoS where a large
+            # template string value containing many ``{{resolve:`` openers
+            # without a closing ``}}`` would stall the linter inside
+            # ``REGEX_DYN_REF.findall``.
+            if has_dynamic_reference(instance):
                 # if we are in a function we can't validate
                 # dynamic references the same way
                 if not any(
@@ -141,7 +146,7 @@ class FunctionFilter:
                     yield (instance, {"dynamicReference": schema}, validator)
                     return
                 return
-            elif REGEX_DYN_REF_SPACES.search(instance):
+            elif "{{" in instance and REGEX_DYN_REF_SPACES.search(instance):
                 yield (instance, {"dynamicReferenceSpaces": schema}, validator)
                 return
 

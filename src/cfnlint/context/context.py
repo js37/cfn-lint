@@ -22,10 +22,10 @@ from cfnlint.helpers import (
     BOOLEAN_STRINGS_TRUE,
     FUNCTIONS,
     PSEUDOPARAMS,
-    REGEX_DYN_REF,
     REGION_PRIMARY,
     TRANSFORM_LANGUAGE_EXTENSION,
     TRANSFORM_SAM,
+    has_dynamic_reference,
 )
 from cfnlint.schema import PROVIDER_SCHEMA_MANAGER, AttributeDict
 
@@ -483,7 +483,7 @@ def _nested_stack_get_atts(filename: str, template_url: str) -> None | Attribute
     if not (template_path.startswith(cwd + os.sep) or template_path == cwd):
         return None
 
-    if re.match(REGEX_DYN_REF, template_path):
+    if has_dynamic_reference(template_path):
         return None
     try:
         from cfnlint.decode import decode

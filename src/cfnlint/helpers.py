@@ -155,7 +155,63 @@ REGEX_IPV6 = re.compile(
     r"^(((?=.*(::))(?!.*\3.+\3))\3?|[\dA-F]{1,4}:)([\dA-F]{1,4}(\3|:\b)|\2){5}(([\dA-F]{1,4}(\3|:\b|$)|\2){2}|(((2[0-4]|1\d|[1-9])?\d|25[0-5])\.?\b){4})\Z",
     re.I | re.S,
 )
-REGEX_DYN_REF = re.compile(r"^.*{{(resolve:.+)}}.*$")
+# NOTE: This regex is intentionally unanchored and uses a negated character
+# class ([^}]*) instead of .+ so that at any given start position matching
+# cannot backtrack. The expensive scanner that walks every string value in a
+# template MUST NOT use ``REGEX_DYN_REF`` directly: at each ``{{`` position the
+# engine still greedily consumes to end of string (polynomial in subject
+# length when the subject contains many ``{{`` openers and no ``}}``). Use
+# :func:`has_dynamic_reference` / :func:`find_dynamic_references` instead -
+# those use ``str.find`` and are strictly linear in the subject length.
+REGEX_DYN_REF = re.compile(r"\{\{(resolve:[^}]*)\}\}")
+
+_DYN_REF_OPENER = "{{resolve:"
+_DYN_REF_CLOSER = "}}"
+
+
+def has_dynamic_reference(instance: str) -> bool:
+    """Return True iff *instance* contains at least one ``{{resolve:...}}``.
+
+    Linear in ``len(instance)`` - uses ``str.find`` only. Safe to call on
+    untrusted template string values of arbitrary size; replaces the previous
+    ``REGEX_DYN_REF.findall``/``.match``/``.search`` call-sites that could
+    backtrack quadratically on inputs with many unterminated ``{{resolve:``
+    openers (CWE-1333).
+    """
+    if not isinstance(instance, str):
+        return False
+    j = instance.find(_DYN_REF_OPENER)
+    if j == -1:
+        return False
+    return instance.find(_DYN_REF_CLOSER, j + len(_DYN_REF_OPENER)) != -1
+
+
+def find_dynamic_references(instance: str) -> list:
+    """Return the contents of every ``{{resolve:...}}`` in *instance*.
+
+    Each returned entry is the string between ``{{`` and ``}}`` (i.e. starts
+    with ``resolve:``), matching the capture group of :data:`REGEX_DYN_REF`
+    for a single reference. Linear in ``len(instance)``.
+    """
+    if not isinstance(instance, str):
+        return []
+    results = []
+    opener = _DYN_REF_OPENER
+    closer = _DYN_REF_CLOSER
+    opener_len = len(opener)
+    closer_len = len(closer)
+    i = 0
+    while True:
+        j = instance.find(opener, i)
+        if j == -1:
+            return results
+        k = instance.find(closer, j + opener_len)
+        if k == -1:
+            return results
+        results.append(instance[j + 2:k])
+        i = k + closer_len
+
+
 REGEX_DYN_REF_SPACES = re.compile(
     r"\{\{\s+resolve\s*:\s*(?:ssm|ssm-secure|secretsmanager)\s*:"
 )

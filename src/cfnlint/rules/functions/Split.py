@@ -11,7 +11,7 @@ from typing import Any
 
 import regex as re
 
-from cfnlint.helpers import REGEX_DYN_REF
+from cfnlint.helpers import has_dynamic_reference
 from cfnlint.jsonschema import ValidationError, ValidationResult, Validator
 from cfnlint.rules.functions._BaseFn import BaseFn
 
@@ -41,7 +41,7 @@ class Split(BaseFn):
             return
 
         key, value = self.key_value(instance)
-        if re.fullmatch(REGEX_DYN_REF, json.dumps(value[1])):
+        if has_dynamic_reference(json.dumps(value[1])):
             yield ValidationError(
                 f"{key!r} does not support dynamic references",
                 validator=self.fn.py,
