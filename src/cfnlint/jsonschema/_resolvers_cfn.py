@@ -385,6 +385,8 @@ def split(validator: Validator, instance: Any) -> ResolutionResult:
                 continue
             if not source_v.is_type(source_string, "string"):
                 continue
+            if not delimiter:
+                continue
 
             yield source_string.split(delimiter), source_v, None
 
