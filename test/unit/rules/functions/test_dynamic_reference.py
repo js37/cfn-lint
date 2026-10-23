@@ -212,6 +212,28 @@ def context(cfn):
                 )
             ],
         ),
+        (
+            "Multi-line value containing an ssm-secure reference is enumerated",
+            "#!/bin/bash\nexport P={{resolve:ssm-secure:/db/pass}}\n",
+            {"type": "test"},
+            {
+                "E1051": _TestRule(),
+                "E1027": _TestRule(),
+                "W1051": _TestRule(),
+            },
+            [],
+        ),
+        (
+            "Two dynamic references of different kinds in one string are both enumerated",
+            "{{resolve:ssm-secure:/foo}}-{{resolve:ssm:/bar}}",
+            {"type": "test"},
+            {
+                "E1051": _TestRule(),
+                "E1027": _TestRule(),
+                "W1051": _TestRule(),
+            },
+            [],
+        ),
     ],
 )
 def test_validate(name, instance, schema, child_rules, expected, rule, context, cfn):

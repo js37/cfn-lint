@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Sequence, Tuple
 from cfnlint.helpers import (
     FUNCTIONS,
     PSEUDOPARAMS,
-    REGEX_DYN_REF,
+    REGEX_DYN_REF_FIND,
     REGEX_DYN_REF_SPACES,
     ToPy,
     ensure_list,
@@ -131,7 +131,7 @@ class FunctionFilter:
             and self.validate_dynamic_references
             and list(validator.context.path.path) != ["Description"]
         ):
-            if REGEX_DYN_REF.findall(instance):
+            if REGEX_DYN_REF_FIND.search(instance):
                 # if we are in a function we can't validate
                 # dynamic references the same way
                 if not any(

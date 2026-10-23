@@ -156,6 +156,12 @@ REGEX_IPV6 = re.compile(
     re.I | re.S,
 )
 REGEX_DYN_REF = re.compile(r"^.*{{(resolve:.+)}}.*$")
+# Unanchored scanner that finds every ``{{resolve:...}}`` dynamic reference in a
+# string, including occurrences inside multi-line scalars (``re.DOTALL``) and
+# multiple references per string.  ``REGEX_DYN_REF`` is a whole-value match
+# pattern kept for ``re.match``/``re.fullmatch`` callers; use this pattern for
+# enumeration (``finditer``/``findall``).
+REGEX_DYN_REF_FIND = re.compile(r"\{\{(resolve:[^}]+)\}\}", re.DOTALL)
 REGEX_DYN_REF_SPACES = re.compile(
     r"\{\{\s+resolve\s*:\s*(?:ssm|ssm-secure|secretsmanager)\s*:"
 )
