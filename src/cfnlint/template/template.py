@@ -29,6 +29,12 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# CDK synth emits ``aws:cdk:path`` values as slash-separated construct paths
+# whose segments are CloudFormation-safe identifier characters. Require at
+# least one '/' so a hand-authored scalar can't masquerade as a CDK marker by
+# setting ``aws:cdk:path: anything``.
+_CDK_PATH_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-_.]*(?:/[A-Za-z0-9\-_.]+)+")
+
 
 class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attributes
     """
@@ -68,6 +74,11 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
 
         self.filename = filename
         self.template = template
+        # Rule IDs the operator forced on via --mandatory-checks. Populated by
+        # the rules runner before match() is called so that heuristic rule-skip
+        # paths (notably the CDK-template skip) can honor mandatory_checks even
+        # when the skip itself is applied inside the rule's match().
+        self.mandatory_rules: list[str] = []
         self.transform_pre: dict[str, Any] = {}
         self.transform_pre["Globals"] = {}
         self.transform_pre["Ref"] = self.search_deep_keys("Ref")
@@ -163,9 +174,20 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
     def is_cdk_template(self) -> bool:
         """Check if the template was created by the AWS Cloud Development Kit (CDK).
 
-        Detected via the AWS::CDK::Metadata resource type, the CDKMetadata
-        logical ID, or any resource carrying an aws:cdk:path metadata entry
-        (covers stacks synthesized with analyticsReporting disabled).
+        Detection is a heuristic hint; it must only trigger on marker shapes a
+        hand-written template is extremely unlikely to produce by accident:
+
+        * a resource of ``Type: AWS::CDK::Metadata`` whose ``Properties`` carry
+          a non-empty ``Analytics`` string, or
+        * any resource whose ``Metadata.aws:cdk:path`` is a non-empty string
+          matching the CDK path grammar (slash-separated path segments made of
+          CloudFormation-safe characters, no leading/trailing slash).
+
+        The bare ``CDKMetadata`` logical-id marker and arbitrary non-empty
+        ``aws:cdk:path`` values are intentionally no longer accepted: a template
+        author can set either without being a CDK synth artifact, and treating
+        them as proof of CDK provenance lets an untrusted template silently
+        suppress rules.
 
         Returns:
             bool: True if the template was created by CDK, False otherwise.
@@ -174,19 +196,40 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
         if not isinstance(resources, dict):
             return False
 
-        for logical_id, properties in resources.items():
+        for _logical_id, properties in resources.items():
             if not isinstance(properties, dict):
                 continue
             resource_type = properties.get("Type")
             if isinstance(resource_type, str) and resource_type == "AWS::CDK::Metadata":
-                return True
-            if str(logical_id) == "CDKMetadata":
-                return True
+                props = properties.get("Properties")
+                if isinstance(props, dict):
+                    analytics = props.get("Analytics")
+                    if isinstance(analytics, str) and analytics.strip():
+                        return True
             metadata = properties.get("Metadata")
-            if isinstance(metadata, dict) and "aws:cdk:path" in metadata:
-                return True
+            if isinstance(metadata, dict):
+                cdk_path = metadata.get("aws:cdk:path")
+                if isinstance(cdk_path, str) and _CDK_PATH_PATTERN.fullmatch(
+                    cdk_path
+                ):
+                    return True
 
         return False
+
+    def is_cdk_rule_skip(self, rule_id: str) -> bool:
+        """Whether a rule should short-circuit for CDK-synthesized templates.
+
+        Honors ``--mandatory-checks``: a rule the operator forced on is never
+        skipped by the CDK heuristic. Callers should prefer this helper over a
+        bare ``is_cdk_template()`` short-circuit so the operator-controlled
+        override can reach rules whose skip is applied inside ``match()``.
+        """
+        if not self.is_cdk_template():
+            return False
+        for mandatory in self.mandatory_rules or []:
+            if rule_id.startswith(mandatory):
+                return False
+        return True
 
     def get_resources(
         self, resource_type: list[str] | str = []

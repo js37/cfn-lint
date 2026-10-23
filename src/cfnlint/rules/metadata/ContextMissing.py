@@ -98,7 +98,7 @@ class ContextMissing(ContextRuleMixin, CloudFormationLintRule):
         self.config.setdefault("additional_low_value_types", [])
 
     def match(self, cfn: Any) -> list[RuleMatch]:
-        if cfn.is_cdk_template():
+        if cfn.is_cdk_rule_skip(self.id):
             return []
         matches = []
         significant = self._significant_resources(cfn)

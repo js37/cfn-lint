@@ -1441,7 +1441,9 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
         self.assertTrue(template.is_cdk_template())
 
     def test_is_cdk_metadata_logical_id(self):
-        # CDKMetadata logical ID with a non-CDK type still signals CDK.
+        # Hardening: a bare ``CDKMetadata`` logical id with a non-CDK type is
+        # no longer treated as a CDK marker -- a hand-written template could
+        # choose that name without being a CDK synth artifact.
         template = Template(
             "test.yaml",
             {
@@ -1452,7 +1454,38 @@ ElasticLoadBalancer -> MyEC2Instance [key=0, source_paths="[\\"Properties\\", \\
                 },
             },
         )
-        self.assertTrue(template.is_cdk_template())
+        self.assertFalse(template.is_cdk_template())
+
+    def test_is_cdk_metadata_resource_type_without_analytics(self):
+        # Resource type ``AWS::CDK::Metadata`` alone is not enough; the
+        # synth-emitted ``Analytics`` property is required.
+        template = Template(
+            "test.yaml",
+            {
+                "Resources": {
+                    "CDKMetadata": {
+                        "Type": "AWS::CDK::Metadata",
+                    },
+                },
+            },
+        )
+        self.assertFalse(template.is_cdk_template())
+
+    def test_is_cdk_path_metadata_scalar_rejected(self):
+        # An arbitrary non-empty ``aws:cdk:path`` scalar is not accepted as a
+        # CDK marker -- it must match the CDK path grammar.
+        template = Template(
+            "test.yaml",
+            {
+                "Resources": {
+                    "Queue": {
+                        "Type": "AWS::SQS::Queue",
+                        "Metadata": {"aws:cdk:path": "not a path"},
+                    },
+                },
+            },
+        )
+        self.assertFalse(template.is_cdk_template())
 
     def test_is_cdk_path_metadata(self):
         # Covers analyticsReporting: false (no AWS::CDK::Metadata resource).

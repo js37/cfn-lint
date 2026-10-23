@@ -45,7 +45,7 @@ class SubNotJoin(CloudFormationLintRule):
     def validate(
         self, validator: Validator, s: Any, instance: Any, schema: Any
     ) -> ValidationResult:
-        if validator.cfn.is_cdk_template():
+        if validator.cfn.is_cdk_rule_skip(self.id):
             return
 
         key = list(instance.keys())[0]

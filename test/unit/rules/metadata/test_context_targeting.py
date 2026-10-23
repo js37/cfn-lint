@@ -19,12 +19,22 @@ class TestTargetingAndConfig(BaseTestCase):
     """Shared targeting policy and configuration options."""
 
     def test_cdk_metadata_resource_marks_template_as_cdk(self):
-        template = "Resources:\n  CDKMetadata:\n    Type: AWS::CDK::Metadata\n"
+        # Requires the synth-emitted Analytics property; the bare resource
+        # type alone no longer suffices.
+        template = (
+            "Resources:\n"
+            "  CDKMetadata:\n"
+            "    Type: AWS::CDK::Metadata\n"
+            "    Properties:\n"
+            "      Analytics: v2:deflate64:HASH\n"
+        )
         self.assertEqual([], match(missing_rule(), template))
 
-    def test_cdk_metadata_logical_id_marks_template_as_cdk(self):
+    def test_cdk_metadata_logical_id_without_cdk_shape_is_not_cdk(self):
+        # A hand-written template that happens to pick the ``CDKMetadata``
+        # logical id must not be able to opt itself out of context rules.
         template = "Resources:\n  CDKMetadata:\n    Type: AWS::SQS::Queue\n"
-        self.assertEqual([], match(missing_rule(), template))
+        self.assertEqual(1, len(match(missing_rule(), template)))
 
     def test_aws_cdk_path_marks_template_as_cdk(self):
         # Any resource carrying aws:cdk:path triggers cfn.is_cdk_template(),

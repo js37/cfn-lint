@@ -127,6 +127,11 @@ class Rules(TypedRules):
         self, filename: str | None, cfn: Template, config: ConfigMixIn
     ) -> Iterator[Match]:
         """Run rules"""
+        # Expose the operator-controlled mandatory_checks list on the template
+        # so rule-local heuristics (notably the CDK-template skip) can honor it
+        # before match() returns. Without this, is_cdk_rule_skip() can't see
+        # mandatory_checks and the skip becomes template-controllable.
+        cfn.mandatory_rules = list(config.mandatory_checks or [])
         # Build enabled rules set once to avoid repeated is_rule_enabled calls
         enabled_rule_ids = set()
         for rule_id, rule in self.data.items():

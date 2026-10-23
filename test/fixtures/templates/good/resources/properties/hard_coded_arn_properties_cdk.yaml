@@ -2,6 +2,8 @@ AWSTemplateFormatVersion: 2010-09-09
 Resources:
   CdkMetadata:
     Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:HASH
 
   S3BadBucket:
     Type: AWS::S3::Bucket

@@ -19,6 +19,8 @@ class TestContextMissingWhy(BaseTestCase):
             "Resources:\n"
             "  CDKMetadata:\n"
             "    Type: AWS::CDK::Metadata\n"
+            "    Properties:\n"
+            "      Analytics: v2:deflate64:HASH\n"
             "  Notifier:\n"
             "    Type: AWS::SNS::Topic\n"
             "    Metadata:\n"

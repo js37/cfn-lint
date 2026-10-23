@@ -52,8 +52,9 @@ class AvailabilityZone(CfnLintKeyword):
         if not isinstance(zones, (str, list)):
             return
 
-        # Skip rule if CDK
-        if validator.cfn.is_cdk_template():
+        # Skip rule if CDK (unless the operator forced W3010 via
+        # --mandatory-checks).
+        if validator.cfn.is_cdk_rule_skip(self.id):
             return
 
         zones = ensure_list(zones)
