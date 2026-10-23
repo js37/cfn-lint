@@ -27,13 +27,35 @@ class JUnitFormatter(BaseFormatter):
         if not rules:
             return None
 
-        test_cases = []
-        for rule in rules.values():
-            if rule.id not in rules.used_rules:
-                if not rule.id:
-                    continue
-                test_case = TestCase(name=f"{rule.id} {rule.shortdesc}")
+        # Group matches by rule id so we emit a failure test case for every
+        # match, even when the rule was never executed by Rules.run (for
+        # example E0000 parse errors, E0001 transform errors, or any other
+        # match produced outside of rule execution).
+        matches_by_rule_id: dict = {}
+        for match in matches:
+            matches_by_rule_id.setdefault(match.rule.id, []).append(match)
 
+        test_cases = []
+        reported_rule_ids = set()
+        for rule in rules.values():
+            if not rule.id:
+                continue
+            rule_matches = matches_by_rule_id.get(rule.id)
+            if rule_matches:
+                test_case = TestCase(
+                    name=f"{rule.id} {rule.shortdesc}",
+                    allow_multiple_subelements=True,
+                    url=rule.source_url,
+                )
+                for match in rule_matches:
+                    test_case.add_failure_info(
+                        message=self._failure_format(match),
+                        failure_type=match.message,
+                    )
+                test_cases.append(test_case)
+                reported_rule_ids.add(rule.id)
+            elif rule.id not in rules.used_rules:
+                test_case = TestCase(name=f"{rule.id} {rule.shortdesc}")
                 if rule.experimental:
                     test_case.add_skipped_info(
                         message="Experimental rule - not enabled"
@@ -41,19 +63,38 @@ class JUnitFormatter(BaseFormatter):
                 else:
                     test_case.add_skipped_info(message="Ignored rule")
                 test_cases.append(test_case)
+                reported_rule_ids.add(rule.id)
             else:
+                # Rule was executed but produced no matches: emit an empty
+                # (passing) test case so the report accounts for it.
                 test_case = TestCase(
                     name=f"{rule.id} {rule.shortdesc}",
                     allow_multiple_subelements=True,
                     url=rule.source_url,
                 )
-                for match in matches:
-                    if match.rule.id == rule.id:
-                        test_case.add_failure_info(
-                            message=self._failure_format(match),
-                            failure_type=match.message,
-                        )
                 test_cases.append(test_case)
+                reported_rule_ids.add(rule.id)
+
+        # Any rule id that appears in matches but is not known to the rules
+        # collection still needs to surface as a failure, otherwise the
+        # report would silently drop those matches.
+        for rule_id, rule_matches in matches_by_rule_id.items():
+            if rule_id in reported_rule_ids:
+                continue
+            first = rule_matches[0]
+            shortdesc = getattr(first.rule, "shortdesc", "") or ""
+            name = f"{rule_id} {shortdesc}".strip() if rule_id else shortdesc
+            test_case = TestCase(
+                name=name or "unknown",
+                allow_multiple_subelements=True,
+                url=getattr(first.rule, "source_url", None),
+            )
+            for match in rule_matches:
+                test_case.add_failure_info(
+                    message=self._failure_format(match),
+                    failure_type=match.message,
+                )
+            test_cases.append(test_case)
 
         test_suite = TestSuite("CloudFormation Lint", test_cases)
 
