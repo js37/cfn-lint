@@ -38,16 +38,30 @@ class TestEquals(TestCase):
         self.assertTrue(equal.test({self.equals_h: "us-east-1"}))
         self.assertFalse(equal.test({self.equals_h: "us-west-2"}))
 
+        # Fn::Equals between two Refs is only decidable when the scenario
+        # supplies a resolved value for both Refs. When both values are
+        # supplied and equal, the equals is True; when they differ it is
+        # False; when either side is missing a ValueError is raised so the
+        # caller treats the result as unknown instead of silently False.
         equal = Equal([self.equals, self.parameter_region])
         self.assertTrue(
             equal.test(
                 {
-                    self.equals_h: self.parameter_region_h,
-                    self.parameter_region_h: self.equals_h,
+                    self.equals_h: "us-east-1",
+                    self.parameter_region_h: "us-east-1",
                 }
             )
         )
-        self.assertFalse(equal.test({self.equals_h: self.parameter_env_h}))
+        self.assertFalse(
+            equal.test(
+                {
+                    self.equals_h: "us-east-1",
+                    self.parameter_region_h: "us-west-2",
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            equal.test({self.equals_h: "us-east-1"})
 
     def test_equals_left_right(self):
         """Test equals scenarios condition"""
@@ -60,12 +74,21 @@ class TestEquals(TestCase):
         self.assertTrue(
             equal.test(
                 {
-                    self.equals_h: self.parameter_region_h,
-                    self.parameter_region_h: self.equals_h,
+                    self.equals_h: "us-east-1",
+                    self.parameter_region_h: "us-east-1",
                 }
             )
         )
-        self.assertFalse(equal.test({self.equals_h: self.parameter_env_h}))
+        self.assertFalse(
+            equal.test(
+                {
+                    self.equals_h: "us-east-1",
+                    self.parameter_region_h: "us-west-2",
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            equal.test({self.equals_h: "us-east-1"})
 
     def test_equal_string_test(self):
         """Test equals scenarios condition"""
