@@ -1,0 +1,18 @@
+# Exact-version pins for the PyPI release build toolchain.
+#
+# This file is the input to pip-compile; it is NOT installed directly.
+# The release workflow runs pip-compile against this file with
+# --generate-hashes and then installs the resulting lockfile with
+# pip install --require-hashes, so every package that executes in the
+# publishing job (which holds id-token: write) is version-pinned AND
+# hash-verified before any code from it runs.
+#
+# Keep requirements/base.txt (the published library's abstract
+# dependency declaration) as broad ranges; this file governs the
+# release build only.
+
+setuptools==80.10.2
+build==1.3.0
+wheel==0.45.1
+twine==6.2.0
+pip-tools==7.6.0
