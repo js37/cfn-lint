@@ -153,6 +153,7 @@ class StatementResources(CfnLintKeyword):
                     if using_fn_arns:
                         continue
                     resources = ensure_list(resources)
+                    all_arn_formats: list = []
                     for resource in resources:
                         # use lower as certain resources are described in actions
                         # with upper case letters and in resources as lower
@@ -160,13 +161,16 @@ class StatementResources(CfnLintKeyword):
                         arn_formats = self.service_map[service]["Resources"][
                             resource.lower()
                         ].get("ARNFormats")
+                        all_arn_formats.extend(arn_formats)
                         for arn_format in arn_formats:
-                            arn = _Arn(arn_format)
-                        if arn in all_resource_arns:
-                            break
+                            if _Arn(arn_format) in all_resource_arns:
+                                break
+                        else:
+                            continue
+                        break
                     else:
                         yield ValidationError(
-                            f"action {action!r} requires a resource of {arn_formats!r}",
+                            f"action {action!r} requires a resource of {all_arn_formats!r}",
                             path=deque(["Resource"]),
                             rule=self,
                         )
