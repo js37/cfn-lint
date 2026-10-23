@@ -17,7 +17,6 @@ SPDX-License-Identifier: MIT
 # Code is taken from jsonschema package and adapted CloudFormation use
 # https://github.com/python-jsonschema/jsonschema
 
-import itertools
 from collections.abc import Mapping, Sequence
 
 import regex as re
@@ -132,62 +131,88 @@ def unbool(element, true=object(), false=object()):
     return element
 
 
+def _hashable(value):
+    """
+    Build a hashable canonical form of ``value`` that preserves the
+    equivalence semantics of :func:`equal`:
+
+    * Booleans and the strings ``"true"``/``"false"`` (any case) collapse to
+      the same token, matching :func:`cfnlint.helpers.bool_compare`.
+    * Numeric scalars share a canonical form with their ``str()`` rendering,
+      matching the string branch of :func:`equal`.
+    * Mappings and sequences are normalised recursively; mapping keys are
+      sorted so order does not matter.
+
+    The result is only used as a dictionary/``set`` key for duplicate
+    detection, which turns the previous O(n^2) ``equal`` scan into an O(n)
+    hash lookup.
+    """
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "true":
+            return ("bool", True)
+        if lowered == "false":
+            return ("bool", False)
+        return ("str", value)
+    if isinstance(value, (int, float)):
+        # ``equal`` treats numbers and their ``str()`` representation as
+        # equivalent whenever one side is a string, so canonicalise through
+        # ``str`` here as well.
+        return ("str", str(value))
+    if value is None:
+        return ("none",)
+    if isinstance(value, Mapping):
+        return (
+            "map",
+            tuple(sorted((k, _hashable(v)) for k, v in value.items())),
+        )
+    if isinstance(value, Sequence):
+        return ("seq", tuple(_hashable(v) for v in value))
+    # Fallback for anything exotic: rely on the object's own hashability if
+    # possible, otherwise its ``repr``.  This path is not reached for normal
+    # template data, which is JSON-shaped.
+    try:
+        hash(value)
+    except TypeError:
+        return ("repr", repr(value))
+    return ("obj", value)
+
+
 def uniq(container):
     """
     Check if all of a container's elements are unique.
 
-    Tries to rely on the container being recursively sortable, or otherwise
-    falls back on (slow) brute force.
+    Uses a hashed canonical form of each element (see :func:`_hashable`) so
+    detection is O(n) rather than the previous O(n^2) ``equal`` scan, while
+    preserving the string/bool/number equivalence semantics of :func:`equal`.
     """
-    c = []
-    for i in container:
-        i = unbool(i)
-        if isinstance(i, (int, float, bool)):
-            i = str(i)
-        c.append(i)
-    try:
-        sort = sorted(unbool(i) for i in c)
-        sliced = itertools.islice(sort, 1, None)
-
-        for i, j in zip(sort, sliced):
-            if equal(i, j):
-                return False
-
-    except (NotImplementedError, TypeError):
-        seen = []
-        for e in c:
-            e = unbool(e)
-            for i in seen:
-                if equal(i, e):
-                    return False
-
-            seen.append(e)
+    seen = set()
+    for element in container:
+        key = _hashable(element)
+        if key in seen:
+            return False
+        seen.add(key)
     return True
 
 
 def uniq_keys(container, keys):
     """
-    Check if all of a container's elements are unique based on a key.
+    Check if all of a container's elements are unique based on a key tuple.
 
-    Tries to rely on the container being recursively sortable, or otherwise
-    falls back on (slow) brute force.
+    Uses a hashed canonical form of the extracted key tuple (see
+    :func:`_hashable`) so detection is O(n) rather than the previous O(n^2)
+    ``equal`` scan.  Elements that do not expose every key are skipped, as
+    before.
     """
-    c = []
-    for i in container:
+    seen = set()
+    for item in container:
         try:
-            o = {}
-            for k in keys:
-                o[k] = i[k]
-            c.append(o)
+            key = tuple(_hashable(item[k]) for k in keys)
         except (KeyError, TypeError):
-            pass
-
-    seen = []
-    for e in c:
-        e = unbool(e)
-        for i in seen:
-            if equal(i, e):
-                return False
-
-        seen.append(e)
+            continue
+        if key in seen:
+            return False
+        seen.add(key)
     return True
