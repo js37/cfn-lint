@@ -98,32 +98,82 @@ class StatementResources(CfnLintKeyword):
         if not validator.is_type(instance, "object"):
             return
 
-        using_fn_arns = False
-        all_resources: set[str] = set()
+        # Collect one scenario per `get_value_from_path` yield (i.e. one per
+        # Fn::If branch, per Resource/NotResource key). Each scenario tracks
+        # its own literal ARNs and whether it contained a wildcard or an
+        # unresolvable (dynamic reference / parameter Ref / other intrinsic)
+        # entry.  Keeping these flags local to the scenario prevents a single
+        # unresolvable or `*` entry from suppressing action/resource checks
+        # for sibling entries, sibling branches, or other actions in the
+        # statement.
+        scenarios: list[dict[str, Any]] = []
+        saw_any_resource_key = False
         for key in ["Resource", "NotResource"]:
             for resources, _ in get_value_from_path(
                 validator, instance, path=deque([key])
             ):
+                saw_any_resource_key = True
                 resources = ensure_list(resources)
 
+                scenario_literals: set[str] = set()
+                scenario_wildcard = False
+                scenario_unresolvable = False
                 for resource in resources:
                     if isinstance(resource, str):
                         if re.match(REGEX_DYN_REF, resource):
-                            return
+                            # value is a {{resolve:...}} dynamic reference;
+                            # unknown at lint time -- skip this single entry.
+                            scenario_unresolvable = True
+                            continue
+                        if resource == "*":
+                            # universal wildcard -- any action matches in this
+                            # scenario.
+                            scenario_wildcard = True
+                            continue
+                        scenario_literals.add(resource)
                     else:
                         k, v = is_function(resource)
                         if k is None:
                             continue
-                        if k == "Ref" and validator.is_type(v, "string"):
-                            if v in validator.context.parameters:
-                                return
-                        using_fn_arns = True
+                        if (
+                            k == "Ref"
+                            and validator.is_type(v, "string")
+                            and v in validator.context.parameters
+                        ):
+                            # Ref to a template parameter -- value supplied at
+                            # deploy time; skip this single entry.
+                            scenario_unresolvable = True
+                            continue
+                        # Any other intrinsic (Fn::Sub, Fn::GetAtt, Fn::Join,
+                        # Fn::ImportValue, ...) is unresolvable for this entry
+                        # only.
+                        scenario_unresolvable = True
                         continue
-                    if resource == "*":
-                        return
-                    all_resources.add(resource)
 
-        all_resource_arns = [_Arn(a) for a in all_resources]
+                scenarios.append(
+                    {
+                        "literals": [_Arn(a) for a in scenario_literals],
+                        "wildcard": scenario_wildcard,
+                        "unresolvable": scenario_unresolvable,
+                    }
+                )
+
+        if not saw_any_resource_key:
+            return
+
+        # If no scenario yielded any usable information (no literals, no
+        # wildcard) emit a debug message so an opted-in pipeline can see that
+        # the check could not be evaluated, rather than silently returning.
+        if scenarios and all(
+            not s["literals"] and not s["wildcard"] for s in scenarios
+        ):
+            LOGGER.debug(
+                "StatementResources (I3510): skipping action/resource match; "
+                "statement contains only unresolvable Resource/NotResource "
+                "entries (dynamic references, parameter Refs, or intrinsics)."
+            )
+            return
+
         for actions, _ in get_value_from_path(
             validator, instance, path=deque(["Action"])
         ):
@@ -150,21 +200,42 @@ class StatementResources(CfnLintKeyword):
                     "Resources", None
                 )
                 if isinstance(resources, (list, str)):
-                    if using_fn_arns:
-                        continue
                     resources = ensure_list(resources)
-                    for resource in resources:
-                        # use lower as certain resources are described in actions
-                        # with upper case letters and in resources as lower
-                        # case issue #4036
-                        arn_formats = self.service_map[service]["Resources"][
-                            resource.lower()
-                        ].get("ARNFormats")
-                        for arn_format in arn_formats:
-                            arn = _Arn(arn_format)
-                        if arn in all_resource_arns:
-                            break
-                    else:
+                    arn_formats = None
+                    # The action is satisfied if, in every scenario, at least
+                    # one literal resource matches an allowed ARN format, the
+                    # scenario has a universal wildcard, or the scenario is
+                    # entirely unresolvable (no literals and no wildcard --
+                    # that case is filtered above, but defensive here).
+                    action_ok = True
+                    for scenario in scenarios:
+                        if scenario["wildcard"]:
+                            continue
+                        if (
+                            not scenario["literals"]
+                            and scenario["unresolvable"]
+                        ):
+                            # Entirely unresolvable scenario -- cannot assert
+                            # a mismatch without a false positive.
+                            continue
+                        matched = False
+                        for resource in resources:
+                            # use lower as certain resources are described in
+                            # actions with upper case letters and in resources
+                            # as lower case issue #4036
+                            arn_formats = self.service_map[service][
+                                "Resources"
+                            ][resource.lower()].get("ARNFormats")
+                            for arn_format in arn_formats:
+                                arn = _Arn(arn_format)
+                            if arn in scenario["literals"]:
+                                matched = True
+                                break
+                        if matched:
+                            continue
+                        action_ok = False
+                        break
+                    if not action_ok:
                         yield ValidationError(
                             f"action {action!r} requires a resource of {arn_formats!r}",
                             path=deque(["Resource"]),
