@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Sequence
@@ -66,6 +67,49 @@ class ProviderSchemaManager:
         self._provider_schema_modules: dict[str, dict[str, str]] = {}
         self._sam_schema_module: dict[str, str] | None = None
         self.reset()
+
+    def _cache_lock_path(self) -> Path:
+        """Return the shared cache lock path.
+
+        Resolved lazily so tests that patch ``get_cache_dir`` after
+        constructing a manager still get the patched path. Readers take
+        LOCK_SH, the writer in ``update()`` takes LOCK_EX, so a concurrent
+        ``--update-specs`` can never serve a reader a half-swapped
+        providers/resources tree.
+        """
+        return Path(get_cache_dir()) / ".update.lock"
+
+    @contextmanager
+    def _reader_lock(self) -> Iterator[None]:
+        """Acquire a shared lock around a providers+resources read.
+
+        Serialises index+schema lookups against the exclusive lock held by
+        update()/_update_locked() so a reader never observes the cache
+        between the two _atomic_replace_dir() swaps. If the lock cannot be
+        acquired (e.g. unwritable cache on a read-only install, or the
+        acquisition timed out) the read falls through without a lock; the
+        underlying file open will still raise and callers now surface
+        that error instead of substituting an empty mapping.
+        """
+        acquired = False
+        try:
+            cm = file_lock(self._cache_lock_path(), shared=True)
+            cm.__enter__()
+            acquired = True
+        except (OSError, TimeoutError) as e:
+            LOGGER.debug(
+                "Reader could not acquire shared schema cache lock: %s", e
+            )
+            yield
+            return
+        try:
+            yield
+        finally:
+            if acquired:
+                try:
+                    cm.__exit__(None, None, None)
+                except Exception:  # pragma: no cover
+                    pass
 
     @staticmethod
     def _read_schema_date(directory: Path) -> str:
@@ -151,6 +195,13 @@ class ProviderSchemaManager:
         Falls back to us-east-1 if the region file is not available.
         Merges SAM resource types from sam.json.
 
+        Readers take a shared (`LOCK_SH`) lock on the schema cache update
+        lock around the index+resources read. This serialises them against
+        the exclusive lock held by `update()` so a concurrent install
+        cannot serve a half-swapped `providers/`+`resources/` pair
+        (empty-mapping or hash-mismatch windows described in
+        `_atomic_replace_dir`).
+
         Args:
             region: Region name (e.g. 'us-east-1')
         Returns:
@@ -159,15 +210,28 @@ class ProviderSchemaManager:
         if region not in self._provider_schema_modules:
             if not (self._providers_dir / "us-east-1.json").exists():
                 self.update(force=False)
-            provider_file = self._providers_dir / f"{region}.json"
-            if not provider_file.exists():
-                provider_file = self._providers_dir / "us-east-1.json"
-            try:
-                with open(provider_file, "r", encoding="utf-8") as f:
-                    self._provider_schema_modules[region] = json.load(f)
-            except FileNotFoundError:
-                self._provider_schema_modules[region] = {}
-            self._provider_schema_modules[region].update(self._load_sam_module())
+            with self._reader_lock():
+                provider_file = self._providers_dir / f"{region}.json"
+                if not provider_file.exists():
+                    provider_file = self._providers_dir / "us-east-1.json"
+                try:
+                    with open(provider_file, "r", encoding="utf-8") as f:
+                        self._provider_schema_modules[region] = json.load(f)
+                except FileNotFoundError:
+                    # The cache is degraded (missing provider index after
+                    # an auto-update attempt). Surface this loudly so a
+                    # broken cache cannot silently disable validation.
+                    # The cached {} still drives E3006 ("Resource type
+                    # does not exist") via ResourceType.py, which exits
+                    # non-zero; this log makes the root cause visible.
+                    LOGGER.error(
+                        "Provider schema index missing for region %r: %s. "
+                        "Run `cfn-lint --update-specs` to repair the cache.",
+                        region,
+                        provider_file,
+                    )
+                    self._provider_schema_modules[region] = {}
+                self._provider_schema_modules[region].update(self._load_sam_module())
         return self._provider_schema_modules[region]
 
     def load_registry_schemas(self, path: str) -> None:
@@ -227,7 +291,31 @@ class ProviderSchemaManager:
                     hash_to_regions[schema_hash] = []
                     hash_to_schema[schema_hash] = schema
                 except ResourceNotFoundError:
-                    continue
+                    # The provider index says this resource type exists
+                    # (schema_hash was set from provider_types.get), so a
+                    # missing resources/<hash>.json means the cache is
+                    # inconsistent (hash-mismatch window of the two-step
+                    # install, or a locally corrupted cache). Previously
+                    # this was silently skipped, which skipped every
+                    # property check for the type and let the lint run
+                    # exit 0. Re-raise so the error surfaces to the
+                    # caller (runner/cli.py converts it into a non-zero
+                    # exit code via rule E0002/E0001 handling) instead of
+                    # being swallowed.
+                    if is_registry_type:
+                        # Registry schemas live only in-memory; a miss
+                        # here is a genuine lookup miss, not cache rot.
+                        continue
+                    LOGGER.error(
+                        "Schema cache inconsistent for %r in %r: provider "
+                        "index references schema %s but the resource "
+                        "schema file is missing. Run `cfn-lint "
+                        "--update-specs` to repair the cache.",
+                        resource_type,
+                        region,
+                        schema_hash,
+                    )
+                    raise
 
             hash_to_regions[schema_hash].append(region)
 
@@ -284,9 +372,15 @@ class ProviderSchemaManager:
             raise ResourceNotFoundError(resource_type, region)
 
         try:
-            schema_file = self._resources_dir / f"{schema_hash}.json"
-            with open(schema_file, "r", encoding="utf-8") as f:
-                self._schemas[region][resource_type] = Schema(json.load(f))
+            # Shared lock around the resource read so the index-hash we
+            # just read above and the resources/<hash>.json we open below
+            # come from the same side of a concurrent install's atomic
+            # swap. Without this, the hash can refer to the new tree
+            # while resources/ is still the old tree.
+            with self._reader_lock():
+                schema_file = self._resources_dir / f"{schema_hash}.json"
+                with open(schema_file, "r", encoding="utf-8") as f:
+                    self._schemas[region][resource_type] = Schema(json.load(f))
             return self._schemas[region][resource_type]
         except Exception as e:
             raise ResourceNotFoundError(resource_type, region) from e
@@ -452,11 +546,24 @@ class ProviderSchemaManager:
 
     @staticmethod
     def _atomic_replace_dir(src: Path, dst: Path) -> None:
-        """Atomically replace dst directory with src.
+        """Replace dst directory with src.
 
-        Renames any existing dst to a backup, renames src to dst,
-        then removes the backup. If rename fails (cross-device),
-        falls back to shutil.move.
+        POSIX rename() cannot swap one non-empty directory for another in
+        a single step, so the final publish is still rename-based.
+        Concurrent readers in `_load_provider_module` and
+        `get_resource_schema` serialise against the writer's exclusive
+        lock via `_reader_lock()`, so the brief rename window inside
+        `_update_locked` is not visible to them. The sequence here is:
+
+            1. Stage any new dst by renaming src into place (if dst is
+               absent). This case is the first-time cold-cache install.
+            2. Otherwise rename dst aside to a backup, then rename src
+               into dst's slot. The old backup is removed last; if we
+               crash before step 3 the backup remains on disk and is
+               cleaned up at the start of the next update.
+            3. Remove the backup.
+
+        Falls back to shutil.move on cross-device renames.
 
         Args:
             src: Source directory (will be moved)
@@ -468,13 +575,25 @@ class ProviderSchemaManager:
         if backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
 
-        # Move existing dst out of the way
-        if dst.exists():
+        if not dst.exists():
+            # Cold-cache install: no transient absence window because dst
+            # never existed in the first place.
             try:
-                dst.rename(backup)
+                src.rename(dst)
             except OSError:
-                # Cross-device or other issue; use shutil
-                shutil.move(str(dst), str(backup))
+                shutil.move(str(src), str(dst))
+            return
+
+        # Move existing dst out of the way. The dst slot is transiently
+        # absent between this rename and the next one; readers that could
+        # observe that state must hold the shared cache lock while the
+        # writer holds the exclusive one, so this transient absence is
+        # only visible to writers.
+        try:
+            dst.rename(backup)
+        except OSError:
+            # Cross-device or other issue; use shutil
+            shutil.move(str(dst), str(backup))
 
         # Move new dir into place
         try:

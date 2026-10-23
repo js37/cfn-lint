@@ -18,8 +18,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 @contextmanager
-def file_lock(lock_path: Path, timeout: float = 300.0) -> Iterator[IO[str]]:
-    """Acquire an exclusive file lock, blocking until available or timeout.
+def file_lock(
+    lock_path: Path, timeout: float = 300.0, shared: bool = False
+) -> Iterator[IO[str]]:
+    """Acquire an advisory file lock, blocking until available or timeout.
 
     Creates the lock file and parent directories if they don't exist.
     The lock is released when the context manager exits.
@@ -27,6 +29,10 @@ def file_lock(lock_path: Path, timeout: float = 300.0) -> Iterator[IO[str]]:
     Args:
         lock_path: Path to the lock file
         timeout: Maximum seconds to wait for the lock (default 5 minutes)
+        shared: If True, acquire a shared (reader) lock; otherwise an
+            exclusive (writer) lock. Shared locks on the schema cache
+            serialise readers against the writer's atomic install so a
+            reader never sees the half-swapped providers/resources state.
 
     Yields:
         The open lock file handle
@@ -37,36 +43,46 @@ def file_lock(lock_path: Path, timeout: float = 300.0) -> Iterator[IO[str]]:
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Open in write mode to create if missing
-    lock_file = open(lock_path, "w", encoding="utf-8")
+    # Shared readers only need read access; writers need write to create.
+    # Always open for read+write so the same code path works for both modes
+    # and so a reader does not truncate an existing lock file.
+    mode = "r+" if shared and lock_path.exists() else "w"
+    lock_file = open(lock_path, mode, encoding="utf-8")
     try:
-        _acquire_lock(lock_file, timeout)
+        _acquire_lock(lock_file, timeout, shared=shared)
         yield lock_file
     finally:
         _release_lock(lock_file)
         lock_file.close()
 
 
-def _acquire_lock(lock_file: IO[str], timeout: float) -> None:
+def _acquire_lock(lock_file: IO[str], timeout: float, shared: bool = False) -> None:
     """Platform-specific lock acquisition with retry loop."""
     if sys.platform == "win32":  # pragma: no cover
         _acquire_lock_windows(lock_file, timeout)
     else:
-        _acquire_lock_unix(lock_file, timeout)
+        _acquire_lock_unix(lock_file, timeout, shared=shared)
 
 
-def _acquire_lock_unix(lock_file: IO[str], timeout: float) -> None:
+def _acquire_lock_unix(
+    lock_file: IO[str], timeout: float, shared: bool = False
+) -> None:
     """Acquire lock on Unix using fcntl.flock()."""
     import fcntl
 
+    lock_mode = (
+        fcntl.LOCK_SH if shared else fcntl.LOCK_EX  # type: ignore[attr-defined]
+    )
     start = time.monotonic()
     while True:
         try:
             fcntl.flock(  # type: ignore[attr-defined]
                 lock_file.fileno(),
-                fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                lock_mode | fcntl.LOCK_NB,  # type: ignore[attr-defined]
             )
-            LOGGER.debug("Acquired schema cache lock")
+            LOGGER.debug(
+                "Acquired %s schema cache lock", "shared" if shared else "exclusive"
+            )
             return
         except (BlockingIOError, OSError):
             if time.monotonic() - start >= timeout:
