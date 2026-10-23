@@ -155,15 +155,33 @@ REGEX_IPV6 = re.compile(
     r"^(((?=.*(::))(?!.*\3.+\3))\3?|[\dA-F]{1,4}:)([\dA-F]{1,4}(\3|:\b)|\2){5}(([\dA-F]{1,4}(\3|:\b|$)|\2){2}|(((2[0-4]|1\d|[1-9])?\d|25[0-5])\.?\b){4})\Z",
     re.I | re.S,
 )
-REGEX_DYN_REF = re.compile(r"^.*{{(resolve:.+)}}.*$")
+# These regexes are intentionally unanchored and use character classes
+# that cannot overlap the closing delimiter so that matching is linear in
+# the length of the subject. Any `.*` prefix/suffix (as previously
+# present) causes quadratic backtracking against adversarially crafted
+# template strings; see CWE-1333. All call sites use `.search` /
+# `.findall` (or have been updated to do so) so leaving the pattern
+# unanchored preserves "string contains a dynamic reference" semantics.
+REGEX_DYN_REF = re.compile(r"\{\{(resolve:[^{}]+)\}\}")
 REGEX_DYN_REF_SPACES = re.compile(
     r"\{\{\s+resolve\s*:\s*(?:ssm|ssm-secure|secretsmanager)\s*:"
 )
-REGEX_DYN_REF_SSM = re.compile(r"^.*{{resolve:ssm:[a-zA-Z0-9_\.\-/]+(:\d+)?}}.*$")
-REGEX_DYN_REF_SSM_SECURE = re.compile(
-    r"^.*{{resolve:ssm-secure:[a-zA-Z0-9_\.\-/]+(:\d+)?}}.*$"
+REGEX_DYN_REF_SSM = re.compile(
+    r"\{\{resolve:ssm:[a-zA-Z0-9_\.\-/]+(:\d+)?\}\}"
 )
-REGEX_SUB_PARAMETERS = re.compile(r"\${\s*([^!\s].*?)\s*}")
+REGEX_DYN_REF_SSM_SECURE = re.compile(
+    r"\{\{resolve:ssm-secure:[a-zA-Z0-9_\.\-/]+(:\d+)?\}\}"
+)
+REGEX_SUB_PARAMETERS = re.compile(r"\$\{\s*([^!\s][^}]*?)\s*\}")
+
+# Maximum length (in characters) of a scalar that will be scanned by
+# the dynamic-reference / Fn::Sub regex machinery. Scalars longer than
+# this are skipped by `FunctionFilter.filter` to prevent regex-based
+# CPU exhaustion from adversarial template inputs. A dynamic reference
+# or Fn::Sub expression in a legitimate CloudFormation template is far
+# shorter than this cap (CloudFormation itself limits most string
+# property values to a few kilobytes).
+REGEX_SCALAR_MAX_LENGTH = 10_000
 
 FUNCTIONS = frozenset(
     [

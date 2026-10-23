@@ -3,8 +3,6 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
-import regex as re
-
 from cfnlint._typing import RuleMatches
 from cfnlint.helpers import REGEX_DYN_REF, REGEX_DYN_REF_SSM
 from cfnlint.rules import CloudFormationLintRule, RuleMatch
@@ -52,8 +50,8 @@ class Password(CloudFormationLintRule):
             for tree in trees:
                 obj = tree[-1]
                 if isinstance(obj, (str)):
-                    if re.match(REGEX_DYN_REF, obj):
-                        if re.match(REGEX_DYN_REF_SSM, obj):
+                    if REGEX_DYN_REF.search(obj):
+                        if REGEX_DYN_REF_SSM.search(obj):
                             message = (
                                 "Password should use a secure dynamic reference for"
                                 f" {'/'.join(map(str, tree[:-1]))}"

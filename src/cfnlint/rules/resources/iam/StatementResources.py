@@ -9,8 +9,6 @@ import logging
 from collections import deque
 from typing import Any
 
-import regex as re
-
 from cfnlint.data import AdditionalSpecs
 from cfnlint.helpers import REGEX_DYN_REF, ensure_list, is_function, load_resource
 from cfnlint.jsonschema import ValidationError, ValidationResult, Validator
@@ -108,7 +106,7 @@ class StatementResources(CfnLintKeyword):
 
                 for resource in resources:
                     if isinstance(resource, str):
-                        if re.match(REGEX_DYN_REF, resource):
+                        if REGEX_DYN_REF.search(resource):
                             return
                     else:
                         k, v = is_function(resource)
