@@ -73,7 +73,26 @@ def expand_deployment_files(
 
     deployments: dict[str, list[ParameterSet]] = {}
     for deployment_file in config.deployment_files:
-        deployment_data = _parse_deployment_file(deployment_file)
+        try:
+            deployment_data = _parse_deployment_file(deployment_file)
+        except Exception as e:  # pylint: disable=broad-except
+            LOGGER.debug(
+                "Unexpected error while parsing deployment file %r: %s",
+                deployment_file,
+                e,
+            )
+            yield None, [
+                Match(
+                    linenumber=1,
+                    columnnumber=1,
+                    linenumberend=1,
+                    columnnumberend=1,
+                    filename=deployment_file,
+                    message=f"Deployment file {deployment_file!r} is not supported",
+                    rule=Configuration(),
+                )
+            ]
+            continue
 
         if not isinstance(deployment_data, DeploymentFileData):
             yield None, deployment_data
