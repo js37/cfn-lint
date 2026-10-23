@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT-0
 import regex as re
 
 from cfnlint._typing import RuleMatches
-from cfnlint.helpers import REGEX_DYN_REF, REGEX_DYN_REF_SSM
+from cfnlint.helpers import BOOLEAN_STRINGS_TRUE, REGEX_DYN_REF, REGEX_DYN_REF_SSM
 from cfnlint.rules import CloudFormationLintRule, RuleMatch
 from cfnlint.template import Template
 
@@ -71,15 +71,9 @@ class Password(CloudFormationLintRule):
                             if key == "Ref":
                                 if value in parameters:
                                     param = cfn.template["Parameters"][value]
-                                    if "NoEcho" in param:
-                                        if not param["NoEcho"]:
-                                            fix_params.append(
-                                                {
-                                                    "Name": value,
-                                                    "Use": password_property,
-                                                }
-                                            )
-                                    else:
+                                    if param.get("NoEcho") not in list(
+                                        BOOLEAN_STRINGS_TRUE
+                                    ) + [True]:
                                         fix_params.append(
                                             {"Name": value, "Use": password_property}
                                         )
