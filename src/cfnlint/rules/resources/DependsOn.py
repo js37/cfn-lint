@@ -25,9 +25,13 @@ class DependsOn(CfnLintKeyword):
         if not validator.is_type(instance, "string"):
             return
 
-        # Skip validation for SAM/MODULE sub-resources (e.g. MyFuncAliaslive
-        # for MyFunc of type AWS::Serverless::Function). SAM generates many
-        # resources with dynamic names that we can't fully enumerate.
+        # Skip validation for ``::MODULE`` sub-resources (e.g.
+        # MyModuleBucket for MyModule of type ``My::Org::Thing::MODULE``):
+        # these sub-resources cannot be enumerated statically. SAM-generated
+        # resources are modeled by exact logical ID in
+        # ``_inject_sam_implicit_resources`` and must NOT be matched by
+        # bare prefix here, which would silently disable E3005 for
+        # arbitrary undefined references that share a SAM logical-ID prefix.
         if any(
             instance.startswith(m) and instance != m
             for m in validator.context.module_names

@@ -193,12 +193,22 @@ class Context:
 
     @cached_property
     def module_names(self) -> tuple[str, ...]:
-        """Logical IDs of MODULE-type resources (lazily computed and cached)"""
+        """Logical IDs of MODULE-type resources (lazily computed and cached).
+
+        Only ``AWS::CloudFormation::*::MODULE`` resources are included here
+        because the sub-resources a MODULE expands into cannot be enumerated
+        statically. SAM-generated resources (``<id>Role``, ``<id>.Version``,
+        ``<id>.Alias``, ``<id>Url``, ``<id><event>Permission``,
+        ``<id>Stage``, ...) are modeled by exact logical ID in
+        ``_inject_sam_implicit_resources`` and must not be matched here by
+        bare prefix, which would silently suppress Ref/GetAtt/DependsOn
+        existence checking for any undefined reference that happens to share
+        a SAM logical-ID prefix.
+        """
         return tuple(
             name
             for name, resource in self.resources.items()
             if resource.type.endswith("::MODULE")
-            or resource.type.startswith("AWS::Serverless::")
         )
 
     def evolve(self, **kwargs) -> "Context":

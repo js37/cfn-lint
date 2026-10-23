@@ -155,16 +155,22 @@ def test_validate_with_no_cfn(rule, validator):
 
 
 def test_sam_module_subresource_skipped(rule, validator):
-    """SAM-generated sub-resources are skipped like MODULE sub-resources.
+    """Only true ``::MODULE`` sub-resources are suppressed from DependsOn
+    existence checking.
 
-    When DependsOn references a resource that starts with a SAM function name
-    (e.g., MyFuncAliaslive for MyFunc of type AWS::Serverless::Function),
-    validation is skipped because SAM generates many resources with dynamic
-    names that can't be fully enumerated.
+    SAM-generated resources (``<id>Role``, ``<id>.Version``, ``<id>.Alias``,
+    ``<id>Url``, ``<id><event>Permission``, ``<id>Stage``, ...) are modeled
+    by exact logical ID in ``_inject_sam_implicit_resources``, so an
+    ``AWS::Serverless::*`` logical ID is NOT a module prefix: a ``DependsOn``
+    whose target merely starts with such a logical ID must still be
+    validated and reported if the target does not exist.
     """
-    # Add a SAM function to the resources
+    # Add a SAM function and a real MODULE resource
     resources = dict(validator.context.resources)
     resources["MyFunc"] = Resource({"Type": "AWS::Serverless::Function"})
+    resources["MyModule"] = Resource(
+        {"Type": "My::Organization::Custom::MODULE"}
+    )
 
     validator = validator.evolve(
         context=validator.context.evolve(
@@ -173,13 +179,22 @@ def test_sam_module_subresource_skipped(rule, validator):
         )
     )
 
-    # DependsOn a SAM-generated alias (MyFuncAliaslive) - should be skipped
-    errs = list(rule.validate(validator, False, "MyFuncAliaslive", {}))
-    assert errs == [], "SAM sub-resource should be skipped"
-
-    # DependsOn the SAM function itself - should still validate
+    # DependsOn the SAM function itself - still valid
     errs = list(rule.validate(validator, False, "MyFunc", {}))
     assert errs == [], "SAM function itself should be valid"
+
+    # DependsOn a name that merely shares a SAM-function prefix must now
+    # error - the SAM wildcard that previously suppressed this check has
+    # been removed because it silently disabled E3005 for arbitrary
+    # undefined references.
+    errs = list(rule.validate(validator, False, "MyFuncAliaslive", {}))
+    assert len(errs) == 1, "SAM prefix wildcard must not suppress E3005"
+    assert "MyFuncAliaslive" in errs[0].message
+
+    # DependsOn a ``::MODULE`` sub-resource is still skipped - the real
+    # MODULE suppression path is unaffected.
+    errs = list(rule.validate(validator, False, "MyModuleBucket", {}))
+    assert errs == [], "MODULE sub-resource should be skipped"
 
     # DependsOn a completely unknown resource - should error
     errs = list(rule.validate(validator, False, "TotallyUnknown", {}))
