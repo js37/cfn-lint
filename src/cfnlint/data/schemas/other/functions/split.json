@@ -9,6 +9,7 @@
      "cfnContext": {
       "functions": [],
       "schema": {
+       "minLength": 1,
        "type": [
         "string"
        ]
