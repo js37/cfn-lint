@@ -65,13 +65,15 @@ class TestConfigMixIn(BaseTestCase):
 
     @patch("cfnlint.config.ConfigFileArgs._read_config", create=True)
     def test_config_file_output(self, yaml_mock):
-        """Test precedence in"""
+        """``output_file`` is operator-only and must not be honoured from the
+        auto-discovered project ``.cfnlintrc``."""
 
         yaml_mock.side_effect = [{"output_file": "test_output.txt"}, {}]
         config = cfnlint.config.ConfigMixIn([])
 
-        # Config file wins
-        self.assertEqual(config.output_file, "test_output.txt")
+        # Config file value is ignored for ``output_file`` — only the CLI or
+        # programmatic caller can set the destination.
+        self.assertIsNone(config.output_file)
 
     @patch("cfnlint.config.ConfigFileArgs._read_config", create=True)
     def test_config_file_output_mixin(self, yaml_mock):
