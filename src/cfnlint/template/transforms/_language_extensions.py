@@ -29,6 +29,19 @@ _SCALAR_TYPES = (str, int, float, bool)
 
 _ACCOUNT_ID = None
 
+# CloudFormation requires Fn::ForEach loop identifiers to be alphanumeric.
+# Compiling the matcher once avoids per-call regex compilation and documents
+# the contract enforced by ``_ForEach.__init__``.
+_FOR_EACH_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z0-9]+$")
+
+# Pre-compiled detector for ``&{Name}`` tokens used by ``_replace_string_params``.
+# ``REGEX_SUB_PARAMETERS`` (imported above) handles the ``${Name}`` form.
+_AMPERSAND_PARAMETERS = re.compile(r"&{\s*[^!\s].*?\s*}")
+
+# Non-alphanumeric stripper applied to replacement values before they are
+# substituted into ``&{Name}`` tokens.
+_NON_ALPHANUMERIC = re.compile(r"[^0-9a-zA-Z]+")
+
 
 class _ResolveError(Exception):
     def __init__(self, message: str, key: Any) -> None:
@@ -220,11 +233,10 @@ class _Transform:
         s: str,
         params: Mapping[str, Any],
     ) -> Tuple[bool, str]:
-        _ampersand_pattern = re.compile(r"&{\s*[^!\s].*?\s*}")
-
         def _has_variables(value: str) -> bool:
             return bool(
-                REGEX_SUB_PARAMETERS.search(value) or _ampersand_pattern.search(value)
+                REGEX_SUB_PARAMETERS.search(value)
+                or _AMPERSAND_PARAMETERS.search(value)
             )
 
         if not _has_variables(s):
@@ -238,8 +250,22 @@ class _Transform:
                     .digest()
                     .hex()[0:4]
                 )
-            new_s = re.sub(rf"\$\{{{k}\}}", v, new_s)
-            new_s = re.sub(rf"\&\{{{k}\}}", re.sub("[^0-9a-zA-Z]+", "", v), new_s)
+            # ``k`` is the Fn::ForEach loop identifier, which comes from the
+            # (untrusted) template. ``re.escape`` neutralises any regex
+            # metacharacters so an identifier like ``(a+)+`` cannot cause
+            # catastrophic backtracking (ReDoS). ``v`` is passed as a function
+            # replacement so backreference syntax (``\1``, ``\g<0>``, trailing
+            # backslashes) in the collection value is treated literally
+            # instead of as an ``re.sub`` replacement template.
+            escaped_k = re.escape(str(k))
+            dollar_value = v
+            ampersand_value = _NON_ALPHANUMERIC.sub("", v)
+            new_s = re.sub(
+                rf"\$\{{{escaped_k}\}}", lambda _m, _v=dollar_value: _v, new_s
+            )
+            new_s = re.sub(
+                rf"\&\{{{escaped_k}\}}", lambda _m, _v=ampersand_value: _v, new_s
+            )
 
         if isinstance(s, str_node):
             new_s = str_node(new_s, s.start_mark, s.end_mark)
@@ -641,6 +667,24 @@ class _ForEach:
             raise _TypeError("Fn::ForEach values must be a list of 3 elements", key)
 
         self._identifier = _ForEachValue.create(value[0])
+        # CloudFormation requires the Fn::ForEach loop identifier to be a
+        # non-empty alphanumeric string. Enforce that here so attacker-supplied
+        # regex metacharacters (e.g. ``(a+)+``) can never reach the pattern
+        # built in ``_replace_string_params`` and cause ReDoS, and so other
+        # non-identifier scalars (ints, bools, etc.) are rejected with a
+        # precise diagnostic instead of silently participating in substitution.
+        if isinstance(value[0], _SCALAR_TYPES) and not isinstance(value[0], bool):
+            identifier_str = str(value[0])
+            if not _FOR_EACH_IDENTIFIER_PATTERN.match(identifier_str):
+                raise _ValueError(
+                    "Fn::ForEach identifier must match '^[a-zA-Z0-9]+$'",
+                    key,
+                )
+        elif isinstance(value[0], bool):
+            raise _ValueError(
+                "Fn::ForEach identifier must match '^[a-zA-Z0-9]+$'",
+                key,
+            )
         self._collection = _ForEachCollection(value[1])
         self._output = _ForEachOutput(value[2])
 
