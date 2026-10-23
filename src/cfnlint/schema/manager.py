@@ -10,9 +10,11 @@ import logging
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import zipfile
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Sequence
@@ -69,25 +71,98 @@ class ProviderSchemaManager:
 
     @staticmethod
     def _read_schema_date(directory: Path) -> str:
-        """Read schema_date from a version.json file."""
+        """Read schema_date from a version.json file.
+
+        Returns the raw string so callers may log or compare it. Use
+        :meth:`_parse_schema_date` to obtain an orderable value.
+        """
         version_file = directory / "version.json"
         try:
             with open(version_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                result: str = data.get("schema_date", "")
+                if not isinstance(data, dict):
+                    return ""
+                result = data.get("schema_date", "")
+                if not isinstance(result, str):
+                    return ""
                 return result
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             return ""
+
+    @staticmethod
+    def _parse_schema_date(value: str) -> datetime | None:
+        """Parse ``schema_date`` into a comparable ``datetime``.
+
+        The cache's ``version.json`` is unauthenticated local input, so
+        comparing the raw string with ``>`` lets an attacker-chosen value
+        such as ``"zzz"`` beat any genuine ISO-8601 timestamp. Parsing to
+        a real ordered type closes that avenue: non-conforming values
+        return ``None`` and are treated as older than any parseable date.
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        # Accept the trailing ``Z`` (UTC) that ``update()`` writes.
+        candidate = value.strip()
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(candidate)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _cache_dir_is_trustworthy(cache_dir: Path) -> bool:
+        """Return True when the cache directory is safe to trust.
+
+        On POSIX we require the directory to be owned by the invoking
+        user and not group- or world-writable (unless the sticky bit is
+        set, which still prevents cross-user tampering). A missing
+        directory is trivially trustworthy (nothing to poison yet). On
+        Windows we fall back to accepting the directory because POSIX
+        ownership/mode semantics do not apply; defence-in-depth there
+        depends on the manifest/parse hardening below.
+        """
+        try:
+            st = os.stat(cache_dir)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+
+        if sys.platform == "win32":
+            return True
+
+        try:
+            if st.st_uid != os.geteuid():
+                return False
+        except AttributeError:  # pragma: no cover - non-POSIX fallback
+            return True
+
+        mode = st.st_mode
+        # Group- or world-writable without sticky bit means another
+        # principal on the host can replace cache contents.
+        if (mode & (stat.S_IWGRP | stat.S_IWOTH)) and not (mode & stat.S_ISVTX):
+            return False
+        return True
 
     @staticmethod
     def _resolve_schema_dirs() -> tuple[Path, Path]:
         """Determine which schema directory to use.
 
         Precedence:
-        1. If both bundled and cache exist, use whichever has a newer schema_date
-        2. If only bundled exists, use bundled
-        3. If only cache exists, use cache
-        4. If neither exists, use cache (auto-download will populate it)
+        1. If the cache directory is not trustworthy (wrong owner or
+           group/world-writable) it is ignored entirely and the bundled
+           corpus is used when available.
+        2. If both bundled and cache exist, use whichever records a
+           strictly newer, parseable ``schema_date``. An unparseable or
+           missing cache ``schema_date`` is treated as older than any
+           parseable bundled value, so a poisoned ``{"schema_date":
+           "zzz"}`` can never outrank the bundled corpus.
+        3. If only bundled exists, use bundled.
+        4. If only cache exists, use cache.
+        5. If neither exists, use cache (auto-download will populate it).
+
+        The selected corpus is logged so a cache takeover is observable.
         """
         _pkg_data = Path(os.path.dirname(__file__), "..", "data", "schemas")
         _pkg_providers = _pkg_data / "providers"
@@ -99,16 +174,52 @@ class ProviderSchemaManager:
             _cache_providers.glob("*.json")
         )
 
+        cache_trusted = ProviderSchemaManager._cache_dir_is_trustworthy(_cache)
+        if cache_exists and not cache_trusted:
+            LOGGER.warning(
+                "Ignoring schema cache at %s: directory is not owned by the "
+                "current user or is group/world-writable",
+                _cache,
+            )
+            cache_exists = False
+
         if bundled_exists and cache_exists:
-            bundled_date = ProviderSchemaManager._read_schema_date(_pkg_data)
-            cache_date = ProviderSchemaManager._read_schema_date(_cache)
-            if cache_date > bundled_date:
+            bundled_raw = ProviderSchemaManager._read_schema_date(_pkg_data)
+            cache_raw = ProviderSchemaManager._read_schema_date(_cache)
+            bundled_parsed = ProviderSchemaManager._parse_schema_date(bundled_raw)
+            cache_parsed = ProviderSchemaManager._parse_schema_date(cache_raw)
+
+            # An unparseable cache date is treated as older than any
+            # parseable bundled date. If the bundled date is also
+            # unparseable we keep bundled (packaged corpus is signed by
+            # the release pipeline, cache is not).
+            use_cache = (
+                cache_parsed is not None
+                and bundled_parsed is not None
+                and cache_parsed > bundled_parsed
+            )
+            if use_cache:
+                LOGGER.info(
+                    "Using cache schema corpus at %s (schema_date=%s, "
+                    "bundled schema_date=%s)",
+                    _cache,
+                    cache_raw,
+                    bundled_raw,
+                )
                 return _cache / "providers", _cache / "resources"
+            LOGGER.info(
+                "Using bundled schema corpus (schema_date=%s, "
+                "cache schema_date=%s)",
+                bundled_raw,
+                cache_raw,
+            )
             return _pkg_providers, _pkg_data / "resources"
 
         if bundled_exists:
+            LOGGER.info("Using bundled schema corpus at %s", _pkg_providers)
             return _pkg_providers, _pkg_data / "resources"
 
+        LOGGER.info("Using cache schema corpus at %s", _cache)
         return _cache / "providers", _cache / "resources"
 
     def reset(self) -> None:
@@ -439,10 +550,24 @@ class ProviderSchemaManager:
 
         try:
             version_content = get_url_content(_VERSION_URL)
+            # Validate structure before persisting: it must be a JSON
+            # object with a parseable ISO-8601 ``schema_date``. Writing
+            # unvalidated content lets a malformed or attacker-shaped
+            # payload sit on disk and later confuse _resolve_schema_dirs.
+            parsed = json.loads(version_content)
+            if not isinstance(parsed, dict):
+                raise ValueError("version.json is not a JSON object")
+            schema_date = parsed.get("schema_date")
+            if not isinstance(schema_date, str) or (
+                ProviderSchemaManager._parse_schema_date(schema_date) is None
+            ):
+                raise ValueError(
+                    "version.json does not contain a parseable schema_date"
+                )
             with open(cache_dir / "version.json", "w", encoding="utf-8") as vf:
                 vf.write(version_content)
-        except Exception:
-            LOGGER.debug("Could not download version.json")
+        except Exception as e:
+            LOGGER.debug("Could not download or validate version.json: %s", e)
 
         self._providers_dir = providers_dir
         self._resources_dir = resources_dir
