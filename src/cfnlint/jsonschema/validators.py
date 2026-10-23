@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from typing import Any, Callable
 
@@ -42,6 +43,16 @@ from cfnlint.schema.resolver import RefResolver, id_of
 from cfnlint.template import Template
 
 LOGGER = logging.getLogger(__name__)
+
+# Maximum nested intrinsic-function resolution depth. CloudFormation templates
+# in practice do not nest intrinsic functions anywhere near this deep, but a
+# malformed template (e.g. a ``Mappings`` cycle via ``Fn::FindInMap`` ->
+# ``Fn::Select`` -> same ``Fn::FindInMap``) can otherwise recurse until Python
+# raises ``RecursionError``. When the limit is hit we stop resolving and
+# simply yield nothing for that branch, so the rest of the template is still
+# validated.
+_RESOLVE_MAX_DEPTH: int = 100
+_resolve_depth: ContextVar[int] = ContextVar("cfnlint_resolve_depth", default=0)
 
 
 def create(
@@ -171,45 +182,64 @@ def create(
         def resolve_value(self, instance: Any) -> ResolutionResult:
             key, value = is_function(instance)
             if key in self.fn_resolvers:
-                count = 0
-                # There is no None in self.fn_resolvers
-                for r_value, r_validator, r_errs in self._resolve_fn(key, value):  # type: ignore
-                    if not r_errs:
-                        try:
-                            region_validator = r_validator.evolve(
-                                context=r_validator.context.evolve(
-                                    resolve_pseudo_parameters=True
-                                )
-                            )
-                            for _, region_context in region_validator.context.ref_value(
-                                "AWS::Region"
-                            ):
-                                if self.cfn.conditions.satisfiable(
-                                    region_context.conditions.status,
-                                    region_context.ref_values,
-                                ):
-                                    count += 1
-                                    if count > self._RESOLVE_MAX_YIELDS:
-                                        return
-                                    yield (
-                                        r_value,
-                                        r_validator.evolve(
-                                            context=region_context.evolve(
-                                                is_resolved_value=True,
-                                            )
-                                        ),
-                                        r_errs,
-                                    )
-                        except UnknownSatisfisfaction as err:
-                            LOGGER.debug(err)
-                            return
-                    else:
-                        yield None, r_validator, r_errs  # type: ignore
+                depth = _resolve_depth.get()
+                if depth >= _RESOLVE_MAX_DEPTH:
+                    # Guard against unbounded (and typically cyclic) nested
+                    # intrinsic-function resolution. Yield nothing so callers
+                    # see no resolved value for this sub-expression.
+                    LOGGER.debug(
+                        "Max resolve_value depth %d reached for %r; aborting"
+                        " this resolution branch.",
+                        _RESOLVE_MAX_DEPTH,
+                        key,
+                    )
+                    return
+                token = _resolve_depth.set(depth + 1)
+                try:
+                    yield from self._resolve_value_fn(key, value)
+                finally:
+                    _resolve_depth.reset(token)
                 return
 
             # The return type is a Protocol and we are returning an instance
             # we will ignore this error
             yield instance, self, None  # type: ignore[misc]
+
+        def _resolve_value_fn(self, key: str, value: Any) -> ResolutionResult:
+            count = 0
+            # There is no None in self.fn_resolvers
+            for r_value, r_validator, r_errs in self._resolve_fn(key, value):  # type: ignore
+                if not r_errs:
+                    try:
+                        region_validator = r_validator.evolve(
+                            context=r_validator.context.evolve(
+                                resolve_pseudo_parameters=True
+                            )
+                        )
+                        for _, region_context in region_validator.context.ref_value(
+                            "AWS::Region"
+                        ):
+                            if self.cfn.conditions.satisfiable(
+                                region_context.conditions.status,
+                                region_context.ref_values,
+                            ):
+                                count += 1
+                                if count > self._RESOLVE_MAX_YIELDS:
+                                    return
+                                yield (
+                                    r_value,
+                                    r_validator.evolve(
+                                        context=region_context.evolve(
+                                            is_resolved_value=True,
+                                        )
+                                    ),
+                                    r_errs,
+                                )
+                    except UnknownSatisfisfaction as err:
+                        LOGGER.debug(err)
+                        return
+                else:
+                    yield None, r_validator, r_errs  # type: ignore
 
         def iter_errors(self, instance: Any) -> ValidationResult:
             r"""
