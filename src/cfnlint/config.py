@@ -927,6 +927,13 @@ class ConfigMixIn(TemplateArgs, CliArgs, ConfigFileArgs):
         file_value = self.file_args.get(arg_name)
         manual_value = self._manual_args.get(arg_name)
 
+        # Rule configuration is a security boundary: a malicious template must
+        # not be able to inject regexes into rule config (see configure_rules
+        # property). Drop the template-supplied value before any merge/return.
+        if arg_name == "configure_rules":
+            template_value = None
+            is_template = False
+
         # merge list configurations
         # make sure we don't do an infinite loop so skip this check for merge_configs
         if arg_name != "merge_configs":
@@ -1131,7 +1138,12 @@ class ConfigMixIn(TemplateArgs, CliArgs, ConfigFileArgs):
 
     @property
     def configure_rules(self):
-        return self._get_argument_value("configure_rules", True, True)
+        # Rule configuration is never read from the untrusted template under
+        # lint: a template that controls both a regex and the string it is run
+        # against can hang cfn-lint via catastrophic backtracking
+        # (CWE-1333). Only the CLI, config file, and manual/API args may set
+        # rule configuration.
+        return self._get_argument_value("configure_rules", False, True)
 
     @property
     def deployment_files(self):

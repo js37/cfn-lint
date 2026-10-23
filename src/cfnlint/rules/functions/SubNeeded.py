@@ -79,8 +79,13 @@ class SubNeeded(CloudFormationLintRule):
         """User-defined exceptions for variables, anywhere in the file"""
         custom_excludes = self.config["custom_excludes"]
         if custom_excludes:
-            custom_search = re.compile(custom_excludes)
-            return re.match(custom_search, value)
+            try:
+                custom_search = re.compile(custom_excludes)
+                # Bound the operator-supplied regex (CWE-1333): a pathological
+                # pattern must not pin cfn-lint on an attacker-sized value.
+                return custom_search.match(value, timeout=1.0)
+            except (re.error, TimeoutError):
+                return False
         return False
 
     def _validate_step_functions(self, var, parameter_string_path, cfn) -> bool:
