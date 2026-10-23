@@ -269,18 +269,29 @@ def dynamicValidation(
                 # Build a dynamic schema with an enum of valid values
                 dynamic_schema: dict[str, Any] = {"enum": collection}
 
-                # For refs, also allow module sub-resource names
-                if context_source == "refs":
-                    module_names = validator.context.module_names
-                    if module_names:
-                        patterns = [{"pattern": f"^{name}.+"} for name in module_names]
-                        dynamic_schema = {"anyOf": [dynamic_schema] + patterns}
+                # For refs, also allow module sub-resource names. SAM and
+                # ``::MODULE`` resources generate child resources with dynamic
+                # names that we can't enumerate, so any Ref whose value is
+                # ``<module-logical-id><suffix>`` is accepted. We check this
+                # with ``str.startswith`` (as DependsOn and GetAtt do) rather
+                # than by interpolating the logical ID into a regex, because
+                # the logical ID is attacker-controlled template text and
+                # unescaped interpolation would allow catastrophic-backtracking
+                # denial of service against the linter.
+                skip_enum = False
+                if context_source == "refs" and isinstance(instance, str):
+                    if any(
+                        instance.startswith(m) and instance != m
+                        for m in validator.context.module_names
+                    ):
+                        skip_enum = True
 
-                # Use descend to validate against the dynamic schema
-                yield from validator.descend(
-                    instance=instance,
-                    schema=dynamic_schema,
-                )
+                if not skip_enum:
+                    # Use descend to validate against the dynamic schema
+                    yield from validator.descend(
+                        instance=instance,
+                        schema=dynamic_schema,
+                    )
 
     path_check = dV.get("pathCheck")
     if path_check:
