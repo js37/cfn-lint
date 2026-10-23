@@ -76,7 +76,7 @@ def rule():
         ),
         (
             "Failure on bad pattern",
-            {"Foo": {"Type": "String", "Pattern": "^Bar$"}},
+            {"Foo": {"Type": "String", "AllowedPattern": "^Bar$"}},
             [ParameterSet(source=None, parameters={"Foo": "D"})],
             [
                 ValidationError(
@@ -96,7 +96,7 @@ def rule():
         ),
         (
             "Not okay with a list and a bad pattern",
-            {"Foo": {"Type": "CommaDelimitedList", "Pattern": "^Bar$"}},
+            {"Foo": {"Type": "CommaDelimitedList", "AllowedPattern": "^Bar$"}},
             [ParameterSet(source=None, parameters={"Foo": ["Bar", "D"]})],
             [
                 ValidationError(

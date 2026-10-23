@@ -62,8 +62,16 @@ class Parameters(CfnLintJsonSchema):
             schema_constraints = {}
             if "AllowedValues" in parameter_object:
                 schema_constraints["enum"] = parameter_object["AllowedValues"]
-            if "Pattern" in parameter_object:
-                schema_constraints["pattern"] = parameter_object["Pattern"]
+            if "AllowedPattern" in parameter_object:
+                schema_constraints["pattern"] = parameter_object["AllowedPattern"]
+            if "MinLength" in parameter_object:
+                schema_constraints["minLength"] = parameter_object["MinLength"]
+            if "MaxLength" in parameter_object:
+                schema_constraints["maxLength"] = parameter_object["MaxLength"]
+            if "MinValue" in parameter_object:
+                schema_constraints["minimum"] = parameter_object["MinValue"]
+            if "MaxValue" in parameter_object:
+                schema_constraints["maximum"] = parameter_object["MaxValue"]
 
             if self._is_type_a_list(parameter_type):
                 schema["properties"][parameter_name] = {
