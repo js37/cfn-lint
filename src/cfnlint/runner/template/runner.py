@@ -49,26 +49,36 @@ def _check_metadata_directives(
         Match: The matches that are not suppressed by metadata directives.
     """
     directives = cfn.get_directives()
+    # Diagnostic rules emitted by the linter itself (parse, transform,
+    # rule-processing errors, etc.) must never be suppressible by a
+    # resource-scoped ignore_checks directive: those matches describe the
+    # health of the scan rather than a property of a specific resource.
+    diagnostic_rule_ids = ("E0000", "E0001", "E0002", "E0003")
 
     for match in matches:
         if match.rule.id not in directives:
             yield match
+            continue
+        if match.rule.id in diagnostic_rule_ids:
+            yield match
+            continue
+        for mandatory_check in config.mandatory_checks:
+            if match.rule.id.startswith(mandatory_check):
+                yield match
+                break
         else:
-            for mandatory_check in config.mandatory_checks:
-                if match.rule.id.startswith(mandatory_check):
-                    yield match
-                    break
-            else:
-                path = getattr(match, "path", None)
-                if path:
-                    if len(path) >= 2:
-                        if path[0] != "Resources":
-                            yield match
-                            continue
-                        if path[1] not in directives[match.rule.id]:
-                            yield match
-                    else:
-                        yield match
+            # Fail-open: only drop a match when it is positively attributed
+            # to a resource named by the suppressing directive. Matches with
+            # no path, a short path, or a non-Resources path are always
+            # reported.
+            path = getattr(match, "path", None) or []
+            if (
+                len(path) >= 2
+                and path[0] == "Resources"
+                and path[1] in directives[match.rule.id]
+            ):
+                continue
+            yield match
 
 
 def _run_template_per_config(
