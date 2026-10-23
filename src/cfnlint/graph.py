@@ -308,7 +308,14 @@ class Graph:
 
     # pylint: disable=import-outside-toplevel,unused-variable
     def to_dot(self, path):
-        """Export the graph to a file with DOT format"""
+        """Export the graph to a file with DOT format.
+
+        ``path`` may be a filesystem path or an already-open writable file
+        object. Callers writing to untrusted locations should open the file
+        themselves (e.g. with ``O_EXCL`` / ``O_NOFOLLOW``) and pass the
+        resulting file object so this method does not perform a
+        symlink-following truncating open on their behalf.
+        """
         graph = deepcopy(self.graph)
         view = self.settings.subgraph_view(graph)
         try:
