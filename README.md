@@ -167,6 +167,22 @@ It will look for a configuration file in the following locations (by order of pr
 
 In that file you can specify settings from the parameter section below.
 
+> **Security:** a `.cfnlintrc` found in the current working directory is
+> treated as *untrusted* input, because `cfn-lint` is routinely invoked
+> inside a checked-out repository that an untrusted contributor can
+> modify (CI on a fork pull request, pre-commit hook, Docker image with
+> the repo mounted as its workdir). The settings that can load Python,
+> redirect output, or change the rule set &mdash; `append_rules`,
+> `custom_rules`, `override_spec`, `registry_schemas` and `output_file`
+> &mdash; are therefore **ignored** when they come from an auto-discovered
+> project `.cfnlintrc`. They are still honoured from the CLI, from
+> `--config-file <path>`, and from the per-user `~/.cfnlintrc`. Pass
+> `--allow-project-rules` to explicitly opt in to honouring these keys
+> from the project file; only do so when the project tree is trusted.
+> When running the pre-commit hook or the Docker image against an
+> untrusted tree, prefer passing `--config-file` explicitly to a known
+> trusted configuration.
+
 Example:
 
 ```yaml
