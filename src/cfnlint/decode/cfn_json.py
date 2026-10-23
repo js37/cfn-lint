@@ -91,6 +91,10 @@ class JSONDecodeError(ValueError):
 
 
 def build_match(message, doc, pos, key=" "):
+    if not isinstance(pos, int):
+        raise TypeError(
+            f"build_match 'pos' must be an int, got {type(pos).__name__}"
+        )
     lineno = doc.count("\n", 0, pos) + 1
     colno = pos - doc.rfind("\n", 0, pos)
 
@@ -520,14 +524,15 @@ class CfnJSONDecoder(json.JSONDecoder):
             try:
                 value, end = scan_once(s, end)
             except StopIteration as err:
+                err_pos = err.value if err.value is not None else 0
                 raise JSONDecodeError(
                     doc=s,
-                    pos=str(err),
+                    pos=err_pos,
                     errors=[
                         build_match(
                             message="Expecting value",
                             doc=s,
-                            pos=str(err),
+                            pos=err_pos,
                         ),
                     ],
                 ) from err

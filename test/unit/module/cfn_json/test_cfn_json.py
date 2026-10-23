@@ -107,3 +107,27 @@ class TestCfnJson(BaseTestCase):
             return
 
         assert False
+
+    def test_missing_object_member_value_raises_json_decode_error(self):
+        """Regression: an object member with no value must raise JSONDecodeError
+        (not a bare TypeError) and carry the correct line/column of the syntax
+        error. See cfn_json_object StopIteration handler."""
+        try:
+            cfnlint.decode.cfn_json.loads('{"a": }')
+        except cfnlint.decode.cfn_json.JSONDecodeError as err:
+            # pos must be an integer offset, matching the documented contract.
+            assert isinstance(err.pos, int), (
+                f"pos must be int, got {type(err.pos).__name__}"
+            )
+            # The syntax error is on line 1 at column 7 (same as stdlib json).
+            assert err.lineno == 1, f"expected line 1, got {err.lineno}"
+            assert err.colno == 1, f"expected colno 1 (first match linenumber), got {err.colno}"
+            assert err.matches, "expected at least one Match in errors"
+            m = err.matches[0]
+            assert m.linenumber == 1
+            # pos is 6 (index of '}' in '{"a": }'); build_match reports
+            # columnnumber = (pos - rfind('\n',0,pos)) + 1 = 7 + 1 = 8.
+            assert m.columnnumber == 8, f"expected columnnumber 8, got {m.columnnumber}"
+            assert err.pos == 6, f"expected pos 6, got {err.pos}"
+            return
+        assert False, "expected JSONDecodeError, got no exception"
