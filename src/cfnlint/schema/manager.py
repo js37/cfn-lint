@@ -173,6 +173,17 @@ class ProviderSchemaManager:
     def load_registry_schemas(self, path: str) -> None:
         """Load extra registry schemas from a directory
 
+        Third-party registry resource types use the ``Org::Service::Resource``
+        naming convention. Documents declaring a ``typeName`` in the reserved
+        ``AWS::``, ``Alexa::`` or ``Custom::`` namespaces, or one that collides
+        with a type already provided by the bundled provider index, would
+        silently replace the trusted built-in schema (``get_resource_schema``
+        consults ``_registry_schemas`` before the provider index). Such
+        documents are rejected here. JSON files under the walked directory
+        that are not resource schemas (missing ``typeName``, or with a
+        non-string ``typeName``) are skipped with a warning instead of being
+        allowed to abort the run with an unhandled ``KeyError``.
+
         Args:
             path (str): the directory to load schema files from
         Returns:
@@ -182,9 +193,107 @@ class ProviderSchemaManager:
             for filename in filenames:
                 if not filename.endswith(".json"):
                     continue
-                with open(os.path.join(dirpath, filename), "r", encoding="utf-8") as fh:
-                    schema = Schema(json.load(fh))
-                    self._registry_schemas[schema.type_name] = schema
+                filepath = os.path.join(dirpath, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as fh:
+                        document = json.load(fh)
+                except (OSError, json.JSONDecodeError) as e:
+                    LOGGER.warning(
+                        "Skipping registry schema file %r: %s", filepath, e
+                    )
+                    continue
+                if not isinstance(document, dict):
+                    LOGGER.warning(
+                        "Skipping registry schema file %r: not a JSON object",
+                        filepath,
+                    )
+                    continue
+                type_name = document.get("typeName")
+                if not isinstance(type_name, str) or not type_name:
+                    LOGGER.warning(
+                        "Skipping registry schema file %r: missing or"
+                        " invalid 'typeName' field",
+                        filepath,
+                    )
+                    continue
+                # Reserved namespaces must not be shadowed by registry
+                # schemas. Third-party registry types are of the form
+                # Org::Service::Resource; AWS::* and Alexa::* are owned by
+                # the bundled provider index, and Custom::* is normalized
+                # to AWS::CloudFormation::CustomResource.
+                reserved_prefixes = ("AWS::", "Alexa::", "Custom::")
+                if type_name.startswith(reserved_prefixes):
+                    LOGGER.warning(
+                        "Refusing to load registry schema file %r: typeName"
+                        " %r uses a reserved namespace (AWS::, Alexa::,"
+                        " Custom::) and would shadow a bundled provider"
+                        " schema",
+                        filepath,
+                        type_name,
+                    )
+                    continue
+                # Reject types already provided by the bundled/cached
+                # provider index (any region). Overriding a built-in
+                # resource schema silently disables schema-driven
+                # validation for that type.
+                if self._is_bundled_resource_type(type_name):
+                    LOGGER.warning(
+                        "Refusing to load registry schema file %r: typeName"
+                        " %r collides with a bundled provider schema and"
+                        " would disable its validation",
+                        filepath,
+                        type_name,
+                    )
+                    continue
+                try:
+                    schema = Schema(document)
+                except (KeyError, TypeError, ValueError) as e:
+                    LOGGER.warning(
+                        "Skipping registry schema file %r: %s", filepath, e
+                    )
+                    continue
+                if type_name in self._registry_schemas:
+                    LOGGER.warning(
+                        "Registry schema file %r redefines typeName %r"
+                        " already loaded from another registry file",
+                        filepath,
+                        type_name,
+                    )
+                self._registry_schemas[type_name] = schema
+
+    def _is_bundled_resource_type(self, resource_type: str) -> bool:
+        """Return True if resource_type is present in the bundled/cached
+        provider index for any region, or in the SAM provider mapping.
+
+        Used to prevent registry schemas from silently overriding a
+        built-in provider schema.
+        """
+        try:
+            sam_types = self._load_sam_module()
+        except Exception:  # pragma: no cover - defensive
+            sam_types = {}
+        if resource_type in sam_types:
+            return True
+        try:
+            if not (self._providers_dir / "us-east-1.json").exists():
+                # Avoid triggering a download just for the collision check;
+                # if the provider index has not been materialized yet, fall
+                # back to "not bundled".
+                return False
+            for region in REGIONS:
+                provider_file = self._providers_dir / f"{region}.json"
+                if not provider_file.exists():
+                    continue
+                try:
+                    with open(provider_file, "r", encoding="utf-8") as f:
+                        provider_types = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if resource_type in provider_types:
+                    return True
+        except Exception:  # pragma: no cover - defensive
+            return False
+        return False
 
     def get_resource_schemas_by_regions(
         self, resource_type: str, regions: Sequence[str]
