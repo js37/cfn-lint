@@ -85,10 +85,27 @@ class Permissions(CfnLintKeyword):
                     pass
 
                 if any(x in permission for x in ["*", "?"]):
+                    # Escape the attacker-controlled permission first so that
+                    # every regex metacharacter is treated literally, and only
+                    # then translate the IAM wildcards (`*` -> `.*`, `?` -> `.`).
+                    # This keeps the resulting pattern linear and prevents
+                    # catastrophic backtracking (ReDoS) as well as uncaught
+                    # `re.error` compile failures from template-controlled input.
+                    escaped = re.escape(permission)
                     permission_regex = (
-                        f"^{permission.replace('*', '.*').replace('?', '.')}$"
+                        "^"
+                        + escaped.replace(r"\*", ".*").replace(r"\?", ".")
+                        + "$"
                     )
-                    if not any(re.match(permission_regex, action) for action in enums):
+                    try:
+                        compiled = re.compile(permission_regex)
+                    except re.error:
+                        yield ValidationError(
+                            f"{permission!r} is not one of {enums!r}",
+                            rule=self,
+                        )
+                        continue
+                    if not any(compiled.match(action) for action in enums):
                         yield ValidationError(
                             f"{permission!r} is not one of {enums!r}",
                             rule=self,
