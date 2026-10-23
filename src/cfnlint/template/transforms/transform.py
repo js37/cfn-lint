@@ -58,16 +58,20 @@ class Transform:
                 continue
 
             matches, template = transform(cfn)
-            LOGGER.debug(
-                "Transformed template from %s: \n%s",
-                name,
-                format_json_string(cfn.template),
-            )
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug(
+                    "Transformed template from %s: \n%s",
+                    name,
+                    format_json_string(cfn.template),
+                )
             if matches:
                 return matches
             cfn.template = template
 
-        LOGGER.info("Transformed template: \n%s", format_json_string(cfn.template))
+        if LOGGER.isEnabledFor(logging.INFO):
+            LOGGER.info(
+                "Transformed template: \n%s", format_json_string(cfn.template)
+            )
         cfn.graph = Graph(cfn)
         cfn.conditions = Conditions(cfn)
         cfn.context = create_context_for_template(cfn)
