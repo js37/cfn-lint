@@ -163,7 +163,11 @@ REGEX_DYN_REF_SSM = re.compile(r"^.*{{resolve:ssm:[a-zA-Z0-9_\.\-/]+(:\d+)?}}.*$
 REGEX_DYN_REF_SSM_SECURE = re.compile(
     r"^.*{{resolve:ssm-secure:[a-zA-Z0-9_\.\-/]+(:\d+)?}}.*$"
 )
-REGEX_SUB_PARAMETERS = re.compile(r"\${\s*([^!\s].*?)\s*}")
+# Use a negated character class instead of `.*?` so a failed match cannot
+# rescan the remainder of the subject looking for `}`. This keeps matching
+# linear in the length of the input (CWE-1333) on pathological inputs such
+# as long runs of unterminated `${` openers.
+REGEX_SUB_PARAMETERS = re.compile(r"\${\s*([^!{}\s][^{}]*?)\s*}")
 
 FUNCTIONS = frozenset(
     [
