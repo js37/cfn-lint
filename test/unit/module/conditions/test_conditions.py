@@ -398,3 +398,52 @@ class TestConditions(TestCase):
                 {"IsDeployed": False, "IsProd": False},
             ],
         )
+
+    def test_rules_or_of_and_pairs_does_not_explode(self):
+        """An Fn::Or of Fn::And pairs placed in the Rules section is also
+        encoded with a linear number of clauses. Previously the rule
+        expression was handed to sympy's ``add_prop`` directly, which
+        distributes And over Or and would create 2^30 clauses for pairs=30
+        (memory exhaustion before any rule runs)."""
+        pairs = 30
+        template = {
+            "Parameters": {
+                "Stage": {"Type": "String", "AllowedValues": ["beta", "prod"]},
+            },
+            "Rules": {
+                "R": {
+                    "Assertions": [
+                        {
+                            "Assert": {
+                                "Fn::Or": [
+                                    {
+                                        "Fn::And": [
+                                            {
+                                                "Fn::Equals": [
+                                                    {"Ref": "AWS::Region"},
+                                                    f"region-{i}",
+                                                ]
+                                            },
+                                            {
+                                                "Fn::Equals": [
+                                                    {"Ref": "Stage"},
+                                                    "prod",
+                                                ]
+                                            },
+                                        ]
+                                    }
+                                    for i in range(pairs)
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            "Resources": {
+                "W": {"Type": "AWS::CloudFormation::WaitConditionHandle"}
+            },
+        }
+
+        cfn = Template("", template)
+        # Linear (not exponential) encoding: 2^30 clauses would be ~1e9.
+        self.assertLess(len(cfn.conditions._cnf.data), 50 * pairs)

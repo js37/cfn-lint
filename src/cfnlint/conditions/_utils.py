@@ -100,6 +100,22 @@ def add_equivalence(cnf: EncodedCNF, symbol: Boolean, expr: Boolean) -> None:
         cnf.add_prop(Equivalent(symbol, literal))
 
 
+def add_assertion(cnf: EncodedCNF, expr: Boolean) -> None:
+    """Assert ``expr`` in ``cnf`` without exponential growth.
+
+    Handing sympy ``add_prop(expr)`` directly makes it convert ``expr`` to
+    CNF by distributing And over Or, so an Or of n Ands becomes 2^n clauses.
+    Instead every And/Or subterm of ``expr`` gets an auxiliary variable
+    defined by a Tseitin encoding, which keeps the clause count linear in
+    the size of ``expr``. Only the single literal that represents the whole
+    expression is then asserted to be true. Each auxiliary variable is fully
+    determined by the original variables, so the satisfiability of ``cnf``
+    plus any constraint over the original variables is unchanged.
+    """
+    literal = _tseitin(cnf, expr, {})
+    cnf.add_prop(literal)
+
+
 def _tseitin(
     cnf: EncodedCNF, expr: Any, cache: dict[Any, Any], root: Any = None
 ) -> Any:
