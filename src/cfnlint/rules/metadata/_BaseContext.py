@@ -27,11 +27,16 @@ CONTEXT_SCHEMA_URL = "https://docs.aws.amazon.com/AWSCloudFormation/latest/Templ
 # (changing it orphans deployed functions).
 _CDK_AWS_CUSTOM_RESOURCE_SINGLETON_ID = "AWS679f53fac002430cb0da5b7982bd2287"
 
-# CFN strips hyphens at synth (framework-onEvent -> frameworkonEvent).
+# CFN strips hyphens at synth (framework-onEvent -> frameworkonEvent). Every
+# alternative is anchored (``re.fullmatch`` is used below) and ends in a
+# synth-emitted suffix (a hex hash or ``Handler<hash>``) so a hand-chosen
+# logical id that merely contains the substring (e.g. ``AdminRoleframeworkonEvent``)
+# does not opt a resource out of context rules.
 _INCIDENTAL_ID_PATTERN = re.compile(
-    r"^LogRetention|(?<=[a-z])Provider(?=framework)"
-    r"|frameworkonEvent|frameworkisComplete"
-    rf"|frameworkonTimeout|^{_CDK_AWS_CUSTOM_RESOURCE_SINGLETON_ID}$"
+    r"LogRetention[0-9a-fA-F]{8,}"
+    r"|[A-Z][A-Za-z0-9]*Providerframework[A-Za-z0-9]+"
+    r"|[A-Z][A-Za-z0-9]*framework(?:onEvent|isComplete|onTimeout)[0-9A-Fa-f]+"
+    rf"|{_CDK_AWS_CUSTOM_RESOURCE_SINGLETON_ID}"
 )
 _PATTERNS_CONFIG: dict[str, Any] = {"default": [], "type": "list", "itemtype": "string"}
 
@@ -44,7 +49,7 @@ def _is_incidental(logical_id: str, extra_patterns: list[str]) -> bool:
     handles only incidental-pattern matching (LogRetention, framework handlers,
     AwsCustomResource singleton, and user-configured patterns).
     """
-    if _INCIDENTAL_ID_PATTERN.search(logical_id):
+    if _INCIDENTAL_ID_PATTERN.fullmatch(logical_id):
         return True
     for pattern in extra_patterns:
         try:

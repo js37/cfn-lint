@@ -213,7 +213,7 @@ class ContextSchemaViolation(ContextRuleMixin, CloudFormationLintRule):
     tags = ["metadata", "context"]
 
     def match(self, cfn: Any) -> list[RuleMatch]:
-        if cfn.is_cdk_template():
+        if cfn.is_cdk_rule_skip(self.id):
             return []
         return self._schema_matches(cfn)
 

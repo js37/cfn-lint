@@ -44,6 +44,7 @@ def validator_cdk():
                 },
                 "CDK": {
                     "Type": "AWS::CDK::Metadata",
+                    "Properties": {"Analytics": "v2:deflate64:HASH"},
                 },
             }
         },

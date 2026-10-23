@@ -21,6 +21,8 @@ class TestContextSchemaRules(BaseTestCase):
             "Resources:\n"
             "  CDKMetadata:\n"
             "    Type: AWS::CDK::Metadata\n"
+            "    Properties:\n"
+            "      Analytics: v2:deflate64:HASH\n"
             "  Fn:\n"
             "    Type: AWS::Lambda::Function\n"
             "    Metadata:\n"
