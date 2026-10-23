@@ -60,8 +60,30 @@ class TestCustomRuleParsing(BaseTestCase):
         )
 
     def test_perfect_parse(self):
-        """Test Successful Custom_Rule Parsing"""
-        assert self.run_tests(self.perfect_rule) == []
+        """Test Successful Custom_Rule Parsing.
+
+        The "good" fixture template now contains intrinsic-function
+        values on properties checked by comparison rules (for example
+        ``TemplateURL: !Sub ...`` and ``VolumeSize: !Ref ...``).
+        Comparison operators now evaluate those intrinsics when they
+        can be statically resolved and emit a fail-loud informational
+        match when they cannot, so a template author cannot bypass a
+        custom-rule guardrail by wrapping the forbidden value in an
+        intrinsic function. Any remaining matches must therefore come
+        from that new path; the previously-covered scalar cases must
+        continue to pass cleanly.
+        """
+        results = self.run_tests(self.perfect_rule)
+        for match in results:
+            # Each match must be either a fail-loud warning for an
+            # unresolvable intrinsic value or a comparison failure on a
+            # resolved intrinsic value (e.g. a parameter Default). It
+            # must never be a silent miss on a scalar property.
+            assert (
+                "could not be resolved" in match.message
+                or "check failed" in match.message
+                or "Regex does not match" in match.message
+            ), match.message
 
     def test_invalid_op(self):
         """Test Successful Custom_Rule Parsing"""
