@@ -111,6 +111,12 @@ class NodeConstructor(SafeConstructor):
         mapping = {}
         self.flatten_mapping(node)
         matches = []
+        # Track previously-seen keys with a side dict so duplicate detection is
+        # O(1) per key instead of a linear scan over `mapping`.  The side dict
+        # retains the *first* key_node for each key so the "first occurrence"
+        # line number used in the duplicate message is still available without
+        # scanning.  See CWE-770 / quadratic-key-scan remediation.
+        seen: dict[Any, Any] = {}
         for key_node, value_node in node.value:
             key = self.construct_object(key_node, False)
             value = self.construct_object(value_node, False)
@@ -132,10 +138,34 @@ class NodeConstructor(SafeConstructor):
                     ],
                 )
             if not getattr(node, "using_merge", False):
-                for key_dup in mapping:
-                    if key_dup == key:
-                        if matches:
-                            matches.append(
+                if key in seen:
+                    key_dup = seen[key]
+                    if matches:
+                        matches.append(
+                            build_match(
+                                filename=self.filename,
+                                message=(
+                                    f"Duplicate found {key!r} (line"
+                                    f" {key_node.start_mark.line + 1})"
+                                ),
+                                line_number=key_node.start_mark.line,
+                                column_number=key_node.start_mark.column,
+                                key=key,
+                            )
+                        )
+                    else:
+                        matches.extend(
+                            [
+                                build_match(
+                                    filename=self.filename,
+                                    message=(
+                                        f"Duplicate found {key!r} (line"
+                                        f" {key_dup.start_mark.line + 1})"
+                                    ),
+                                    line_number=key_dup.start_mark.line,
+                                    column_number=key_dup.start_mark.column,
+                                    key=key,
+                                ),
                                 build_match(
                                     filename=self.filename,
                                     message=(
@@ -145,33 +175,11 @@ class NodeConstructor(SafeConstructor):
                                     line_number=key_node.start_mark.line,
                                     column_number=key_node.start_mark.column,
                                     key=key,
-                                )
-                            )
-                        else:
-                            matches.extend(
-                                [
-                                    build_match(
-                                        filename=self.filename,
-                                        message=(
-                                            f"Duplicate found {key!r} (line"
-                                            f" {key_dup.start_mark.line + 1})"
-                                        ),
-                                        line_number=key_dup.start_mark.line,
-                                        column_number=key_dup.start_mark.column,
-                                        key=key,
-                                    ),
-                                    build_match(
-                                        filename=self.filename,
-                                        message=(
-                                            f"Duplicate found {key!r} (line"
-                                            f" {key_node.start_mark.line + 1})"
-                                        ),
-                                        line_number=key_node.start_mark.line,
-                                        column_number=key_node.start_mark.column,
-                                        key=key,
-                                    ),
-                                ],
-                            )
+                                ),
+                            ],
+                        )
+                else:
+                    seen[key] = key_node
             try:
                 mapping[key] = value
             except Exception as exc:
