@@ -255,11 +255,22 @@ class TestSamModuleLoading(BaseTestCase):
             sam_data = {"AWS::Serverless::Function": "sam123"}
             (providers_dir / "us-east-1.json").write_text(json.dumps(region_data))
             (providers_dir / "sam.json").write_text(json.dumps(sam_data))
+            # Satisfy the cache-completeness check so no repair update
+            # is triggered during this test.
+            (resources_dir / "abc123.json").write_text(
+                json.dumps({"typeName": "AWS::S3::Bucket", "properties": {}})
+            )
+            (resources_dir / "sam123.json").write_text(
+                json.dumps(
+                    {"typeName": "AWS::Serverless::Function", "properties": {}}
+                )
+            )
 
             self.manager._providers_dir = providers_dir
             self.manager._resources_dir = resources_dir
             self.manager._sam_schema_module = None
             self.manager._provider_schema_modules = {}
+            self.manager._cache_integrity_checked = False
 
             result = self.manager._load_provider_module("us-east-1")
             self.assertIn("AWS::S3::Bucket", result)
@@ -328,6 +339,8 @@ class TestAutoDownloadOnMissingSchemas(BaseTestCase):
         import tempfile
         from pathlib import Path
 
+        from cfnlint.schema._exceptions import SchemaNotFoundError
+
         with tempfile.TemporaryDirectory() as tmpdir:
             providers_dir = Path(tmpdir) / "providers"
             providers_dir.mkdir()
@@ -335,12 +348,71 @@ class TestAutoDownloadOnMissingSchemas(BaseTestCase):
             self.manager._providers_dir = providers_dir
             self.manager._provider_schema_modules = {}
 
-            self.manager._load_provider_module("us-east-1")
+            # update is mocked, so the provider index is still absent after
+            # the auto-download attempt. Loading now fails closed rather
+            # than silently substituting an empty mapping.
+            with self.assertRaises(SchemaNotFoundError):
+                self.manager._load_provider_module("us-east-1")
             mock_update.assert_called_once_with(force=False)
 
     @patch("cfnlint.schema.manager.ProviderSchemaManager.update")
     def test_no_auto_download_when_providers_exist(self, mock_update):
-        """When provider files exist, update is not called"""
+        """When provider files AND the referenced resources exist, update is not called"""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            providers_dir = Path(tmpdir) / "providers"
+            providers_dir.mkdir()
+            (providers_dir / "us-east-1.json").write_text(
+                json.dumps({"AWS::S3::Bucket": "abc123"})
+            )
+            resources_dir = Path(tmpdir) / "resources"
+            resources_dir.mkdir()
+            (resources_dir / "abc123.json").write_text(
+                json.dumps({"typeName": "AWS::S3::Bucket", "properties": {}})
+            )
+
+            self.manager._providers_dir = providers_dir
+            self.manager._resources_dir = resources_dir
+            self.manager._provider_schema_modules = {}
+            self.manager._sam_schema_module = {}
+            self.manager._cache_integrity_checked = False
+
+            self.manager._load_provider_module("us-east-1")
+            mock_update.assert_not_called()
+
+    @patch("cfnlint.schema.manager.ProviderSchemaManager.update")
+    def test_auto_downloads_when_resources_missing(self, mock_update):
+        """When the provider index references hashes that are not on disk,
+        the resources/ cache is treated as incomplete and update(force=True)
+        is invoked to repair it rather than silently iterating zero schemas."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            providers_dir = Path(tmpdir) / "providers"
+            providers_dir.mkdir()
+            (providers_dir / "us-east-1.json").write_text(
+                json.dumps({"AWS::S3::Bucket": "abc123"})
+            )
+            # resources_dir exists but is empty: abc123.json is missing.
+            resources_dir = Path(tmpdir) / "resources"
+            resources_dir.mkdir()
+
+            self.manager._providers_dir = providers_dir
+            self.manager._resources_dir = resources_dir
+            self.manager._provider_schema_modules = {}
+            self.manager._sam_schema_module = {}
+            self.manager._cache_integrity_checked = False
+
+            self.manager._load_provider_module("us-east-1")
+            mock_update.assert_called_once_with(force=True)
+
+    @patch("cfnlint.schema.manager.ProviderSchemaManager.update")
+    def test_auto_downloads_when_resources_dir_missing(self, mock_update):
+        """When the resources/ directory itself does not exist, a repair
+        update is triggered instead of silently disabling validation."""
         import tempfile
         from pathlib import Path
 
@@ -352,11 +424,13 @@ class TestAutoDownloadOnMissingSchemas(BaseTestCase):
             )
 
             self.manager._providers_dir = providers_dir
+            self.manager._resources_dir = Path(tmpdir) / "resources_absent"
             self.manager._provider_schema_modules = {}
             self.manager._sam_schema_module = {}
+            self.manager._cache_integrity_checked = False
 
             self.manager._load_provider_module("us-east-1")
-            mock_update.assert_not_called()
+            mock_update.assert_called_once_with(force=True)
 
 
 class TestManagerGetResourceSchema(BaseTestCase):

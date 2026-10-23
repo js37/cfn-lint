@@ -1,5 +1,6 @@
 __all__ = [
     "ResourceNotFoundError",
+    "SchemaNotFoundError",
     "AttributeDict",
     "GetAtt",
     "GetAttType",
@@ -11,7 +12,7 @@ __all__ = [
     "reset",
 ]
 
-from cfnlint.schema._exceptions import ResourceNotFoundError
+from cfnlint.schema._exceptions import ResourceNotFoundError, SchemaNotFoundError
 from cfnlint.schema._getatts import AttributeDict
 from cfnlint.schema._patch import SchemaPatch, patch, reset
 from cfnlint.schema._schema import Schema
