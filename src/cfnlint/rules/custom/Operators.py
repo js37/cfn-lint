@@ -317,7 +317,27 @@ def CreateNotEqualsRule(rule_id, resourceType, prop, value, error_message):
 def CreateRegexMatchRule(rule_id, resourceType, prop, value, error_message):
     def rule_func(value, expected_values, path):
         matches = []
-        if not re.match(expected_values.strip(), str(value).strip()):
+        try:
+            # Bound the matching work so a pathological pattern combined with
+            # an attacker-controlled template value cannot hang the lint
+            # process via catastrophic backtracking. The `regex` module
+            # supports a `timeout` keyword that raises TimeoutError when the
+            # match exceeds the budget.
+            result = re.match(
+                expected_values.strip(), str(value).strip(), timeout=1
+            )
+        except TimeoutError:
+            matches.append(
+                cfnlint.rules.RuleMatch(
+                    path,
+                    (
+                        "Regex match timed out (possible catastrophic"
+                        " backtracking in custom rule pattern)"
+                    ),
+                )
+            )
+            return matches
+        if not result:
             matches.append(
                 cfnlint.rules.RuleMatch(path, error_message or "Regex does not match")
             )
