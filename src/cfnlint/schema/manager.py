@@ -497,10 +497,31 @@ class ProviderSchemaManager:
 
         resource_types = []
         all_resource_types = self.get_resource_types(region)[:]
+
+        def _compile_override_pattern(pattern: str) -> re.Pattern:
+            # Build a matcher from the literal entry, treating only '*' as a
+            # wildcard (glob semantics as documented). Every other character
+            # is escaped so override-spec entries cannot inject regex
+            # metacharacters or trigger catastrophic backtracking.
+            parts = re.split(r"(\*)", pattern)
+            compiled = "".join(
+                ".*" if part == "*" else re.escape(part) for part in parts
+            )
+            try:
+                return re.compile(compiled + "$")
+            except re.error as err:
+                LOGGER.error(
+                    "Override spec resource type entry %r is not a valid"
+                    " pattern: %s",
+                    pattern,
+                    err,
+                )
+                sys.exit(1)
+
         # Remove unsupported resource using includes
         if patch.included_resource_types:
             for include in patch.included_resource_types:
-                regex = re.compile(include.replace("*", "(.*)") + "$")
+                regex = _compile_override_pattern(include)
                 matches = [
                     string for string in all_resource_types if re.match(regex, string)
                 ]
@@ -511,7 +532,7 @@ class ProviderSchemaManager:
 
         # Remove unsupported resources using the excludes
         for exclude in patch.excluded_resource_types:
-            regex = re.compile(exclude.replace("*", "(.*)") + "$")
+            regex = _compile_override_pattern(exclude)
             matches = [string for string in resource_types if re.match(regex, string)]
             for match in matches:
                 resource_types.remove(match)
