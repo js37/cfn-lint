@@ -14,8 +14,8 @@ class Formatter(BaseFormatter):
         formatstr = "{0} {1}\n{2}:{3}:{4}\n"
         return formatstr.format(
             match.rule.id,
-            match.message,
-            match.filename,
+            self._sanitize_message(match.message),
+            self._sanitize_message(match.filename),
             match.linenumber,
             match.columnnumber,
         )
