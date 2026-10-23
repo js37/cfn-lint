@@ -95,7 +95,17 @@ class Equal:
         return cls(instance=instance, left=left, right=right)
 
     def __post_init__(self):
-        object.__setattr__(self, "hash", get_hash(self.instance))
+        # Hash on the normalised parameter hashes rather than the raw instance
+        # list. The raw list still holds the unconverted scalar literal (e.g.
+        # ``1`` vs ``True`` vs ``1.0``), and get_hash now distinguishes those,
+        # but keying off ``(left.hash, right.hash)`` additionally keeps this
+        # engine in step with cfnlint.conditions._equals which normalises
+        # scalars via str() before hashing. This way two Equal objects that
+        # EqualParameter.create_from_instance already normalised to the same
+        # string get the same symbol regardless of input Python type.
+        object.__setattr__(
+            self, "hash", get_hash([self.left.hash, self.right.hash])
+        )
         if isinstance(self.left.instance, (str, int, bool, float)) and isinstance(
             self.right.instance, (str, int, bool, float)
         ):

@@ -168,14 +168,33 @@ class TestUtils(unittest.TestCase):
 
     def test_get_hash_simple_types(self):
         """Test get_hash with simple types"""
-        # Test with simple types
+        # Test with simple types -- the hash is type-tagged so that
+        # 1, 1.0 and True (and 0, 0.0, False) are kept distinct.
         string_hash = get_hash("test")
-        expected_hash = hashlib.sha1("test".encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha1("str:test".encode("utf-8")).hexdigest()
         self.assertEqual(string_hash, expected_hash)
 
         int_hash = get_hash(123)
-        expected_hash = hashlib.sha1("123".encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha1("int:123".encode("utf-8")).hexdigest()
         self.assertEqual(int_hash, expected_hash)
+
+    def test_get_hash_distinguishes_int_bool_float(self):
+        """Different Python scalar types that compare equal must still
+        hash to different digests, otherwise the context conditions
+        solver maps distinct Fn::Equals to the same SAT variable."""
+        self.assertNotEqual(get_hash(1), get_hash(True))
+        self.assertNotEqual(get_hash(1), get_hash(1.0))
+        self.assertNotEqual(get_hash(0), get_hash(False))
+        self.assertNotEqual(get_hash(0), get_hash(0.0))
+        self.assertNotEqual(
+            get_hash([{"Ref": "P"}, 1]), get_hash([{"Ref": "P"}, True])
+        )
+        self.assertNotEqual(
+            get_hash([{"Ref": "P"}, 1]), get_hash([{"Ref": "P"}, 1.0])
+        )
+        self.assertNotEqual(
+            get_hash({"a": 1}), get_hash({"a": True})
+        )
 
     def test_get_hash_dict(self):
         """Test get_hash with dictionaries"""
