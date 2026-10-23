@@ -29,6 +29,25 @@ _SCALAR_TYPES = (str, int, float, bool)
 
 _ACCOUNT_ID = None
 
+# Hard, constant budgets used by ``_Transform`` to bound Fn::ForEach
+# expansion.  Without these a ~1 KB attacker-authored template with
+# nested Fn::ForEach keys can expand to millions of nodes (growth is
+# N**D for N items at D nesting levels) and exhaust CPU and RAM in the
+# process running cfn-lint.  Breaching any one of these caps raises
+# ``_ValueError``, which ``language_extension`` already converts into
+# a clean TransformError match.
+#
+# ``_MAX_EXPANDED_NODES`` matches the YAML-alias guard in
+# ``cfnlint.decode.cfn_yaml`` so the two amplification vectors share
+# one ceiling.  ``_MAX_FOR_EACH_ITERATIONS`` and
+# ``_MAX_FOR_EACH_DEPTH`` sit above the CloudFormation service limits
+# documented for Fn::ForEach while still cutting off the exponential
+# before it hurts.
+_MAX_EXPANDED_NODES = 250_000
+_MAX_FOR_EACH_ITERATIONS = 150
+_MAX_FOR_EACH_DEPTH = 10
+_MAX_WALK_DEPTH = 300
+
 
 class _ResolveError(Exception):
     def __init__(self, message: str, key: Any) -> None:
@@ -102,15 +121,49 @@ def language_extension(cfn: Any) -> TransformResult:
 class _Transform:
     def __init__(self) -> None:
         self._collections: MutableMapping[str, str] = {}
+        # Number of dict/list nodes emitted across the whole transform.
+        # Bounded by ``_MAX_EXPANDED_NODES`` to defuse Fn::ForEach bombs:
+        # a ~1 KB nested-ForEach template can otherwise expand to
+        # millions of nodes.
+        self._emitted_nodes: int = 0
 
     def transform(self, cfn: Any) -> TransformResult:
         """Transform the template"""
-        return [], self._walk(cfn.template, {}, cfn)
+        return [], self._walk(cfn.template, {}, cfn, 0, 0)
 
-    # pylint: disable=too-many-return-statements
-    def _walk(self, item: Any, params: MutableMapping[str, Any], cfn: Any):
+    def _account_for(self, key: Any) -> None:
+        """Bump the emitted-node counter and fail fast past the budget.
+
+        ``key`` is attached to the raised ``_ValueError`` so the
+        resulting TransformError match points at a reasonable location
+        when the input key carries YAML start/end marks.
+        """
+        self._emitted_nodes += 1
+        if self._emitted_nodes > _MAX_EXPANDED_NODES:
+            raise _ValueError(
+                "Transform expansion exceeded node budget of "
+                f"{_MAX_EXPANDED_NODES} nodes; refusing to continue",
+                key,
+            )
+
+    # pylint: disable=too-many-return-statements,too-many-arguments
+    def _walk(
+        self,
+        item: Any,
+        params: MutableMapping[str, Any],
+        cfn: Any,
+        depth: int = 0,
+        for_each_depth: int = 0,
+    ):
+        if depth > _MAX_WALK_DEPTH:
+            raise _ValueError(
+                "Transform recursion exceeded maximum depth of "
+                f"{_MAX_WALK_DEPTH}; refusing to continue",
+                item,
+            )
         obj = deepcopy(item)
         if isinstance(obj, dict):
+            self._account_for(item)
             # adjust keys if needed
             if params:
                 for k, v in item.items():
@@ -122,15 +175,34 @@ class _Transform:
             for k, v in deepcopy(obj).items():
                 # see if key matches Fn::ForEach
                 if re.match(FUNCTION_FOR_EACH, k):
+                    if for_each_depth >= _MAX_FOR_EACH_DEPTH:
+                        raise _ValueError(
+                            "Fn::ForEach nesting exceeded maximum depth of "
+                            f"{_MAX_FOR_EACH_DEPTH}",
+                            k,
+                        )
                     # only translate the foreach if its valid
                     foreach = _ForEach(k, v, self._collections)
                     # get the values will flatten the foreach
+                    iterations = 0
                     for collection_value in foreach.items(cfn, params):
+                        iterations += 1
+                        if iterations > _MAX_FOR_EACH_ITERATIONS:
+                            raise _ValueError(
+                                "Fn::ForEach collection exceeded maximum "
+                                f"iterations of {_MAX_FOR_EACH_ITERATIONS}",
+                                k,
+                            )
                         flattened = self._walk(
-                            v[2], {**params, **{v[0]: collection_value}}, cfn
+                            v[2],
+                            {**params, **{v[0]: collection_value}},
+                            cfn,
+                            depth + 1,
+                            for_each_depth + 1,
                         )
                         for f_k, f_v in flattened.items():
                             if f_k not in obj:
+                                self._account_for(f_k)
                                 obj[f_k] = f_v
                             else:
                                 raise _ValueError(
@@ -143,7 +215,7 @@ class _Transform:
                     return obj
                 elif k == "Fn::GetAtt":
                     if isinstance(v, (list, str)):
-                        obj[k] = self._walk(v, params, cfn)
+                        obj[k] = self._walk(v, params, cfn, depth + 1, for_each_depth)
                 elif k == "Fn::Sub":
                     if isinstance(v, str):
                         only_string, obj[k] = self._replace_string_params(v, params)
@@ -157,7 +229,9 @@ class _Transform:
                         if only_string:
                             return obj[k][0]
                         if len(v) == 2:
-                            obj[k][1] = self._walk(v[1], params, cfn)
+                            obj[k][1] = self._walk(
+                                v[1], params, cfn, depth + 1, for_each_depth
+                            )
                 elif k == "Fn::FindInMap":
                     try:
                         mapping = _ForEachValueFnFindInMap(get_hash(v), v)
@@ -178,7 +252,7 @@ class _Transform:
                         # leave it as it is
                         LOGGER.debug("Transform and Fn::FindInMap error: %s", {str(e)})
                     for i, el in enumerate(v):
-                        v[i] = self._walk(el, params, cfn)
+                        v[i] = self._walk(el, params, cfn, depth + 1, for_each_depth)
                     obj[k] = v
                 elif k == "Ref":
                     if isinstance(v, str):
@@ -188,7 +262,7 @@ class _Transform:
                             # above / issue #4697).
                             return deepcopy(params[v])
                     elif isinstance(v, dict):
-                        r = self._walk(v, params, cfn)
+                        r = self._walk(v, params, cfn, depth + 1, for_each_depth)
                         if isinstance(r, str):
                             if r in params:
                                 return deepcopy(params[r])
@@ -198,10 +272,16 @@ class _Transform:
                         # CloudFormation does not resolve the condition name
                         # (index 0) inside Fn::ForEach, so we leave it as-is
                         # and only walk the true/false branches.
-                        obj[k][1] = self._walk(v[1], params, cfn)
-                        obj[k][2] = self._walk(v[2], params, cfn)
+                        obj[k][1] = self._walk(
+                            v[1], params, cfn, depth + 1, for_each_depth
+                        )
+                        obj[k][2] = self._walk(
+                            v[2], params, cfn, depth + 1, for_each_depth
+                        )
                 else:
-                    sub_value = self._walk(v, params, cfn)
+                    sub_value = self._walk(
+                        v, params, cfn, depth + 1, for_each_depth
+                    )
                     # a sub object may be none or we have returned
                     # an empty object.  We don't want to remove empty
                     # strings "" or 0 (zeros)
@@ -211,8 +291,9 @@ class _Transform:
                     else:
                         obj[k] = sub_value
         elif isinstance(obj, list):
+            self._account_for(item)
             for i, v in enumerate(obj):
-                obj[i] = self._walk(v, params, cfn)
+                obj[i] = self._walk(v, params, cfn, depth + 1, for_each_depth)
         return obj
 
     def _replace_string_params(
