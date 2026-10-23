@@ -133,11 +133,14 @@ def run_template_by_file_path(
         rules (Rules): The set of rules to be applied to the template.
     """
 
+    # Reset per-template state so that one template's Metadata.cfn-lint
+    # config can never influence how another template is reported when
+    # decode fails (decode failures do not reach the set_template_args call
+    # in _run_template).
+    config.set_template_args({})
     (template, matches) = decode(filename)  # type: ignore
     if matches:
-        if ignore_bad_template or any(
-            "E0000".startswith(x) for x in config.ignore_checks
-        ):
+        if ignore_bad_template:
             matches = [match for match in matches if match.rule.id != "E0000"]
 
         yield from iter(matches)
