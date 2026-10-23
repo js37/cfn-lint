@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
+import bisect
 import fileinput
 import logging
 import sys
@@ -40,6 +41,20 @@ FN_PREFIX = "Fn::"
 # structure that exhausts CPU in any consumer that walks the template.  Reject
 # templates whose alias-resolved size exceeds this many nodes.
 _MAX_EXPANDED_NODES = 250_000
+
+# Reject source templates larger than this.  cfn-lint is routinely invoked on
+# attacker-supplied templates (pre-commit hooks, CI linting of fork PRs, IDE
+# plugins, SaaS pipelines via cfnlint.api.lint), and the YAML scanner's cost
+# scales with input size.  Legitimate CloudFormation templates are capped at
+# 1 MiB by the service itself, so refusing larger inputs is safe.
+_MAX_TEMPLATE_BYTES = 5 * 1024 * 1024
+
+# Hard cap on the number of alias tokens processed when recording YAML alias
+# locations for rule W1101.  A single attacker-written file can contain an
+# arbitrary number of aliases; refuse to process more than this and emit one
+# aggregate match for the overflow, as `_guard_alias_expansion` already does
+# for alias-resolved node count.
+_MAX_ALIAS_TOKENS = 10_000
 
 LOGGER = logging.getLogger(__name__)
 
@@ -379,6 +394,11 @@ def _alias_path(template: Any, mark) -> list[str | int]:
     mapping, the entry holding the alias is the last key that starts before
     it; keys from a merge ("<<") lie outside the mapping's span and are
     skipped.  Stops at the deepest node that can be located.
+
+    This single-alias helper re-walks the template per call and is kept for
+    backwards compatibility; the batch path used by `_find_aliases` goes
+    through `_build_entry_index` + `_alias_path_from_index`, which is
+    O(log nodes) per alias instead of O(width) per alias.
     """
     position = _position(mark)
     path: list[str | int] = []
@@ -417,24 +437,189 @@ def _alias_path(template: Any, mark) -> list[str | int]:
         node = child
 
 
+# Sentinel for `_build_entry_index` to represent "no end" (open-ended span).
+_OPEN_END: tuple[int, int] = (sys.maxsize, sys.maxsize)
+
+
+def _build_entry_index(
+    template: Any,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[list[str | int]]]:
+    """Build a sorted index of value-entry source spans for one template.
+
+    Walks the decoded tree once (bounded by `_MAX_EXPANDED_NODES` via the
+    identity-memoized guard that runs just before this) and records, for every
+    addressable value site, a tuple of (start_position, end_position, path).
+    Shared sub-trees (reachable through more than one alias) are visited once
+    using object identity.  The resulting lists are sorted by `start_position`,
+    enabling O(log nodes) lookup per alias via `_alias_path_from_index`.
+    """
+    starts: list[tuple[int, int]] = []
+    ends: list[tuple[int, int]] = []
+    paths: list[list[str | int]] = []
+    visited: set[int] = set()
+
+    def end_of(node: Any, fallback: tuple[int, int]) -> tuple[int, int]:
+        # Scalars from the YAML loader (int, bool, None, custom int-ish
+        # literals) carry no `end_mark`.  Fall back to the enclosing span so a
+        # scalar entry doesn't swallow unrelated later aliases.
+        end = getattr(node, "end_mark", None)
+        if end is None:
+            return fallback
+        return _position(end)
+
+    def record(start: tuple[int, int], end: tuple[int, int], path: list[str | int]):
+        # Only well-formed, non-empty intervals contribute useful info.
+        if start < end:
+            starts.append(start)
+            ends.append(end)
+            paths.append(path)
+
+    def walk(node: Any, path: list[str | int], parent_end: tuple[int, int]) -> None:
+        nid = id(node)
+        if nid in visited:
+            return
+        if isinstance(node, dict):
+            visited.add(nid)
+            node_end_mark = getattr(node, "end_mark", None)
+            if node_end_mark is not None:
+                container_end = _position(node_end_mark)
+            else:
+                container_end = parent_end
+            node_start_mark = getattr(node, "start_mark", None)
+            node_start_pos = (
+                _position(node_start_mark) if node_start_mark is not None else (0, 0)
+            )
+            # Pre-compute the start positions of each (key, child) so a scalar
+            # child's span can be bounded by the next sibling's start.
+            key_list = list(node)
+            key_starts: list[tuple[int, int]] = []
+            for key in key_list:
+                key_mark = getattr(key, "start_mark", None)
+                key_starts.append(
+                    _position(key_mark) if key_mark is not None else node_start_pos
+                )
+            for i, key in enumerate(key_list):
+                start = key_starts[i]
+                child = node[key]
+                # Bound a markless child by (a) its own end_mark if present,
+                # (b) the next sibling's start, or (c) the container's end.
+                sibling_bound = (
+                    key_starts[i + 1] if i + 1 < len(key_starts) else container_end
+                )
+                end = end_of(child, sibling_bound)
+                # If the child is itself the resolved target of an alias used
+                # here, its end_mark points back to where the anchor was
+                # defined -- which is behind `start`, giving an empty
+                # interval.  Fall back to the sibling bound so the entry
+                # still contains the key's own source span.
+                if end <= start:
+                    end = sibling_bound
+                child_path = path + [key]
+                record(start, end, child_path)
+                walk(child, child_path, container_end)
+        elif isinstance(node, list):
+            visited.add(nid)
+            node_end_mark = getattr(node, "end_mark", None)
+            if node_end_mark is not None:
+                container_end = _position(node_end_mark)
+            else:
+                container_end = parent_end
+            for index, item in enumerate(node):
+                # An aliased list item carries the anchor's marks, not its own
+                # source position, so an entry built from `item.start_mark`
+                # cannot reliably locate the alias.  Only emit entries whose
+                # span lies within the enclosing list -- aliased items
+                # therefore fall through to the list-level entry, which is
+                # the deepest path we can honestly report for them.
+                child_path = path + [index]
+                item_start = getattr(item, "start_mark", None)
+                item_end = getattr(item, "end_mark", None)
+                node_start = getattr(node, "start_mark", None)
+                node_start_pos = (
+                    _position(node_start) if node_start is not None else (0, 0)
+                )
+                if item_start is not None and item_end is not None:
+                    item_start_pos = _position(item_start)
+                    item_end_pos = _position(item_end)
+                    if (
+                        item_start_pos >= node_start_pos
+                        and item_end_pos <= container_end
+                    ):
+                        record(item_start_pos, item_end_pos, child_path)
+                walk(item, child_path, container_end)
+        # Scalars contribute no entries beyond their parent's record.
+
+    walk(template, [], _OPEN_END)
+    # Sort entries by start position while keeping (start, end, path) aligned.
+    order = sorted(range(len(starts)), key=starts.__getitem__)
+    starts = [starts[i] for i in order]
+    ends = [ends[i] for i in order]
+    paths = [paths[i] for i in order]
+    return starts, ends, paths
+
+
+def _alias_path_from_index(
+    index: tuple[list[tuple[int, int]], list[tuple[int, int]], list[list[str | int]]],
+    mark,
+) -> list[str | int]:
+    """Return the path of the deepest template entry whose source span
+    contains the alias token at `mark`, using the pre-sorted entry index
+    produced by `_build_entry_index`.
+
+    YAML entry spans are properly nested (a child's span lies inside its
+    parent's), so after bisecting for the largest `start <= position` we need
+    at most O(depth) steps backwards to find an entry whose `end > position`.
+    In the common degenerate shape (many aliases inside a single wide
+    mapping) the bisected candidate is already the correct entry, giving
+    O(log nodes) per alias.
+    """
+    starts, ends, paths = index
+    position = _position(mark)
+    # Rightmost entry with start <= position
+    i = bisect.bisect_right(starts, position) - 1
+    while i >= 0:
+        if ends[i] > position:
+            return list(paths[i])
+        i -= 1
+    return []
+
+
 def _find_aliases(yaml_string: str, template: Any) -> list[YamlAlias]:
     """Record where each YAML alias is used in yaml_string.
 
     Aliases are resolved while the document is composed, which the C loader
     does natively, so the decoded template cannot tell an aliased value from
     a literal one.  Scan the tokens to recover each alias's own location.
+
+    A single sorted (start -> path) index is built once per template and
+    binary-searched per alias, bounding total work at O(nodes log nodes +
+    aliases log nodes) rather than O(aliases x width).  Processing stops at
+    `_MAX_ALIAS_TOKENS` with one aggregate overflow entry so an attacker
+    cannot force unbounded work via an unbounded number of alias tokens.
     """
-    aliases = []
+    aliases: list[YamlAlias] = []
+    index = _build_entry_index(template)
+    overflow = False
     for token in scan(yaml_string, Loader=FastLoader):
         if isinstance(token, AliasToken):
+            if len(aliases) >= _MAX_ALIAS_TOKENS:
+                overflow = True
+                break
             aliases.append(
                 YamlAlias(
                     name=token.value,
-                    path=_alias_path(template, token.start_mark),
+                    path=_alias_path_from_index(index, token.start_mark),
                     start_mark=Mark(token.start_mark.line, token.start_mark.column),
                     end_mark=Mark(token.end_mark.line, token.end_mark.column),
                 )
             )
+    if overflow:
+        LOGGER.warning(
+            "Template contains more than %d YAML aliases; only the first %d "
+            "are reported for rule W1101",
+            _MAX_ALIAS_TOKENS,
+            _MAX_ALIAS_TOKENS,
+        )
     return aliases
 
 
@@ -442,6 +627,29 @@ def loads(yaml_string, fname=None):
     """
     Load the given YAML string
     """
+    # Enforce an upper bound on template size before any YAML parsing.  The
+    # scanner's cost (anchor/alias handling in particular) scales with input
+    # size, and a shared CI runner lint-ing an attacker-supplied template
+    # should refuse pathologically large inputs rather than melting CPU.
+    if (
+        isinstance(yaml_string, (str, bytes, bytearray))
+        and len(yaml_string) > _MAX_TEMPLATE_BYTES
+    ):
+        raise CfnParseError(
+            fname,
+            [
+                build_match(
+                    filename=fname,
+                    message=(
+                        f"Template exceeds the maximum supported size of "
+                        f"{_MAX_TEMPLATE_BYTES} bytes"
+                    ),
+                    line_number=0,
+                    column_number=0,
+                    key="",
+                )
+            ],
+        )
     try:
         loader = CfnFullLoader(yaml_string, fname)
         loader.add_multi_constructor("!", multi_constructor)
