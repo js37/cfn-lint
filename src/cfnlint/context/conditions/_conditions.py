@@ -9,7 +9,7 @@ import itertools
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
-from sympy import Not, Or, Symbol
+from sympy import Dummy, Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
@@ -83,19 +83,41 @@ class Conditions:
                 continue
             allowed_values = p_v.allowed_values.copy()
             equals_cnfs: list[tuple[Symbol, str]] = []
+            # Deduplicate by equals-value so equals that compare the same
+            # parameter to the same literal (which are logically identical
+            # and share a sympy Symbol via Equal.cnf) only enter the
+            # mutual-exclusion encoding once.
+            seen_vals: set[str] = set()
             for _, c_v in obj.items():
                 for i in c_v.equals:
                     if i.right.hash == get_hash({"Ref": p_k}):
                         if not isinstance(i.left.instance, str):
                             continue
-                        # NAND: two equals comparing the same param to
-                        # different static values can't both be true
-                        for prev_cnf, prev_val in equals_cnfs:
-                            if prev_val != i.left.instance:
-                                cnf.add_prop(~(i.cnf & prev_cnf))
+                        if i.left.instance in seen_vals:
+                            continue
+                        seen_vals.add(i.left.instance)
                         equals_cnfs.append((i.cnf, i.left.instance))
                         if i.left.instance in allowed_values:
                             allowed_values.remove(i.left.instance)
+
+            # A parameter can only equal one value at a time, so at most one
+            # of the equals comparing this parameter to a distinct literal
+            # may be True. Emit this as a linear sequential-counter AMO
+            # encoding instead of O(n^2) pairwise NAND clauses.
+            n = len(equals_cnfs)
+            if n == 2:
+                cnf.add_prop(~(equals_cnfs[0][0] & equals_cnfs[1][0]))
+            elif n > 2:
+                vars_ = [c for c, _ in equals_cnfs]
+                prefix = [Dummy("amo") for _ in range(n - 1)]
+                cnf.add_prop(Or(Not(vars_[0]), prefix[0]))
+                for i_idx in range(1, n - 1):
+                    cnf.add_prop(Or(Not(vars_[i_idx]), prefix[i_idx]))
+                    cnf.add_prop(Or(Not(prefix[i_idx - 1]), prefix[i_idx]))
+                    cnf.add_prop(
+                        Or(Not(vars_[i_idx]), Not(prefix[i_idx - 1]))
+                    )
+                cnf.add_prop(Or(Not(vars_[n - 1]), Not(prefix[n - 2])))
 
             if not allowed_values and equals_cnfs:
                 cnf.add_prop(Or(*[c for c, _ in equals_cnfs]))
