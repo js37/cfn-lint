@@ -3,11 +3,10 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
-import regex as re
-
 # pylint: disable=cyclic-import
 import cfnlint.rules
 from cfnlint._typing import RuleMatches
+from cfnlint.helpers_regex import safe_regex_match
 
 OPERATOR = [
     "EQUALS",
@@ -317,7 +316,12 @@ def CreateNotEqualsRule(rule_id, resourceType, prop, value, error_message):
 def CreateRegexMatchRule(rule_id, resourceType, prop, value, error_message):
     def rule_func(value, expected_values, path):
         matches = []
-        if not re.match(expected_values.strip(), str(value).strip()):
+        # ``expected_values`` is a regex from the user's custom-rules file;
+        # ``value`` can come from the template. Bound the match so a
+        # pathological pattern or subject cannot stall the lint process
+        # (CWE-1333). A timeout / regex error is treated as a non-match
+        # and logged at debug by ``safe_regex_match``.
+        if safe_regex_match(expected_values.strip(), str(value).strip()) is not True:
             matches.append(
                 cfnlint.rules.RuleMatch(path, error_message or "Regex does not match")
             )
