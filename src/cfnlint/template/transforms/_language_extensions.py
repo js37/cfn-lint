@@ -49,6 +49,13 @@ class _TypeError(Exception):
 
 
 def language_extension(cfn: Any) -> TransformResult:
+    # Reset the module-global account-id guess so that a value derived from
+    # a previously transformed template cannot leak into this one. Without
+    # this reset the value survives for the lifetime of the Python process
+    # and makes lint results order-dependent across unrelated templates
+    # (see issue: module-global _ACCOUNT_ID leaks across templates).
+    global _ACCOUNT_ID
+    _ACCOUNT_ID = None
     transform = _Transform()
     try:
         return transform.transform(cfn)
