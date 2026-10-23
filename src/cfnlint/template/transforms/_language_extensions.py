@@ -8,8 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import random
-import string
 from copy import deepcopy
 from typing import Any, Iterator, Mapping, MutableMapping, Tuple
 
@@ -21,9 +19,6 @@ from cfnlint.helpers import FUNCTION_FOR_EACH, REGEX_SUB_PARAMETERS
 from cfnlint.template.transforms._types import TransformResult
 
 LOGGER = logging.getLogger("cfnlint")
-
-# initializing size of string
-_N = 7
 
 _SCALAR_TYPES = (str, int, float, bool)
 
@@ -582,7 +577,10 @@ class _ForEachCollection:
                 try:
                     yield item.value(cfn, {}, False)
                 except _ResolveError:
-                    v = "".join(random.choices(string.ascii_letters, k=_N))  # nosec
+                    # Derive a deterministic, recognisable placeholder from the
+                    # value's stable hash so that identical templates produce
+                    # identical transformed documents (reproducible lint output).
+                    v = f"ForEachPlaceholder{item.hash[:8]}"
                     collection_cache[item.hash] = v
                     yield v
             return
@@ -608,9 +606,14 @@ class _ForEachCollection:
                 if self._fn.hash in collection_cache:
                     yield from iter(collection_cache[self._fn.hash])
                 else:
+                    # Derive deterministic, recognisable placeholders from the
+                    # intrinsic's stable hash. Two values are emitted to match
+                    # the behaviour of other unresolvable list collections
+                    # (e.g. CommaDelimitedList Refs) which also surface two
+                    # elements for the rules to iterate over.
                     collection_cache[self._fn.hash] = []
-                    for _ in range(0, 2):
-                        v = "".join(random.choices(string.ascii_letters, k=_N))  # nosec
+                    for i in range(0, 2):
+                        v = f"ForEachPlaceholder{self._fn.hash[:8]}{i}"
                         collection_cache[self._fn.hash].append(v)
                         yield v
                 return
