@@ -12,7 +12,7 @@ from typing import Any
 import regex as re
 
 from cfnlint.data import AdditionalSpecs
-from cfnlint.helpers import REGEX_DYN_REF, ensure_list, is_function, load_resource
+from cfnlint.helpers import ensure_list, has_dynamic_reference, is_function, load_resource
 from cfnlint.jsonschema import ValidationError, ValidationResult, Validator
 from cfnlint.rules.helpers import get_value_from_path
 from cfnlint.rules.jsonschema.CfnLintKeyword import CfnLintKeyword
@@ -108,7 +108,7 @@ class StatementResources(CfnLintKeyword):
 
                 for resource in resources:
                     if isinstance(resource, str):
-                        if re.match(REGEX_DYN_REF, resource):
+                        if has_dynamic_reference(resource):
                             return
                     else:
                         k, v = is_function(resource)

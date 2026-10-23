@@ -12,7 +12,7 @@ import regex as re
 
 from cfnlint._typing import RuleMatches
 from cfnlint.decode import decode
-from cfnlint.helpers import REGEX_DYN_REF
+from cfnlint.helpers import has_dynamic_reference
 from cfnlint.rules import CloudFormationLintRule, RuleMatch
 from cfnlint.template.template import Template
 
@@ -148,7 +148,7 @@ class NestedStackParameters(CloudFormationLintRule):
                     template_path = os.path.normpath(
                         os.path.join(base_dir, template_location)
                     )
-                    if re.match(REGEX_DYN_REF, template_path):
+                    if has_dynamic_reference(template_path):
                         continue
                     nested_parameters = self._get_template_parameters(template_path)
                     template_parameters = obj.get("Parameters")
