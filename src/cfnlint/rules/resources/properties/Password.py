@@ -6,7 +6,11 @@ SPDX-License-Identifier: MIT-0
 import regex as re
 
 from cfnlint._typing import RuleMatches
-from cfnlint.helpers import REGEX_DYN_REF, REGEX_DYN_REF_SSM
+from cfnlint.helpers import (
+    REGEX_DYN_REF,
+    REGEX_DYN_REF_SSM,
+    SECRET_PROPERTY_LEAF_NAMES,
+)
 from cfnlint.rules import CloudFormationLintRule, RuleMatch
 from cfnlint.template import Template
 
@@ -26,7 +30,11 @@ class Password(CloudFormationLintRule):
         """Check CloudFormation Password Parameters"""
 
         matches = []
-        password_properties = [
+        # Historical heuristic list of credential-bearing property names.
+        # Augmented with the leaf names derived from the single source of
+        # truth shared with E1027/W1011 so new entries added there (e.g.
+        # ``AuthToken``) are automatically covered here.
+        heuristic_password_properties = [
             "AccountPassword",
             "AdminPassword",
             "ADDomainJoinPassword",
@@ -37,6 +45,10 @@ class Password(CloudFormationLintRule):
             "MasterUserPassword",
             "PasswordParam",
         ]
+        password_properties = list(heuristic_password_properties)
+        for leaf in SECRET_PROPERTY_LEAF_NAMES:
+            if leaf not in password_properties:
+                password_properties.append(leaf)
 
         parameters = list(cfn.template.get("Parameters", {}).keys())
         fix_params = []

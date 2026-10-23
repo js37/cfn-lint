@@ -165,6 +165,43 @@ REGEX_DYN_REF_SSM_SECURE = re.compile(
 )
 REGEX_SUB_PARAMETERS = re.compile(r"\${\s*([^!\s].*?)\s*}")
 
+# Resource property paths that are known to carry secret values.  This is the
+# single source of truth consumed by W1011, E1027 and W2501 so that the three
+# rules cannot drift out of sync about what counts as a secret-bearing
+# property.  See docs/rules.md for the related rules.
+SECRET_PROPERTY_PATHS = (
+    "Resources/AWS::DirectoryService::MicrosoftAD/Properties/Password",
+    "Resources/AWS::DirectoryService::SimpleAD/Properties/Password",
+    "Resources/AWS::ElastiCache::ReplicationGroup/Properties/AuthToken",
+    "Resources/AWS::IAM::User/Properties/LoginProfile/Password",
+    "Resources/AWS::KinesisFirehose::DeliveryStream/Properties/RedshiftDestinationConfiguration/Password",
+    "Resources/AWS::OpsWorks::App/Properties/AppSource/Password",
+    "Resources/AWS::OpsWorks::Stack/Properties/RdsDbInstances/*/DbPassword",
+    "Resources/AWS::OpsWorks::Stack/Properties/CustomCookbooksSource/Password",
+    "Resources/AWS::RDS::DBCluster/Properties/MasterUserPassword",
+    "Resources/AWS::RDS::DBInstance/Properties/MasterUserPassword",
+    "Resources/AWS::Redshift::Cluster/Properties/MasterUserPassword",
+)
+
+
+def _secret_property_leaf_names() -> list[str]:
+    """Return the distinct leaf property names from SECRET_PROPERTY_PATHS.
+
+    These are the terminal segments (e.g. ``AuthToken``, ``Password``,
+    ``DbPassword``, ``MasterUserPassword``) that identify a secret-bearing
+    property regardless of its parent resource type.  The result is suitable
+    for passing to ``Template.search_deep_keys`` for simple name-based lookups.
+    """
+    seen: list[str] = []
+    for path in SECRET_PROPERTY_PATHS:
+        leaf = path.rsplit("/", 1)[-1]
+        if leaf and leaf != "*" and leaf not in seen:
+            seen.append(leaf)
+    return seen
+
+
+SECRET_PROPERTY_LEAF_NAMES = tuple(_secret_property_leaf_names())
+
 FUNCTIONS = frozenset(
     [
         "Fn::Base64",
