@@ -65,6 +65,16 @@ class _MappingSecondaryKey:
             if k == "Fn::Transform":
                 is_transform = True
             elif isinstance(k, str) and isinstance(v, (str, list, int, float)):
+                # CloudFormation Mappings values are scalars or lists of
+                # scalars. Reject list values that contain non-scalar
+                # elements (e.g. an intrinsic-function object), both because
+                # the real CloudFormation service does not accept them and
+                # because retaining them lets a crafted template build a
+                # resolution cycle through Fn::FindInMap / Fn::Select.
+                if isinstance(v, list) and any(
+                    not isinstance(e, (str, int, float, bool)) for e in v
+                ):
+                    continue
                 keys[k] = v
         return cls(keys, is_transform)
 
