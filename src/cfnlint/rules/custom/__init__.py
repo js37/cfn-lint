@@ -42,12 +42,16 @@ def make_rule(line, lineNumber):
 
         return raw_value
 
-    line = line.rstrip()
+    raw_line = line.rstrip()
     # check line is not a comment or empty line
-    if not line.startswith("#") and line != "":
+    if not raw_line.startswith("#") and raw_line != "":
         rule_id = lineNumber + 9000
-        line = line.split(" ", 3)
+        line = raw_line.split(" ", 3)
         error_level = "E"
+        if len(line) != 4:
+            return cfnlint.rules.custom.Operators.CreateInvalidRule(
+                "E" + str(rule_id), raw_line
+            )
         if len(line) == 4:
             resourceType = line[0]
             prop = line[1]
@@ -119,3 +123,4 @@ def make_rule(line, lineNumber):
         return cfnlint.rules.custom.Operators.CreateInvalidRule(
             "E" + str(rule_id), operator
         )
+    return None
