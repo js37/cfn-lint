@@ -39,23 +39,24 @@ def patch(filename: str, regions: Sequence[str]):
             schema_patch = SchemaPatch.from_dict(custom_spec_data)
             for region in regions:
                 PROVIDER_SCHEMA_MANAGER.patch(schema_patch, region)
-
-            OTHER_SCHEMA_MANAGER.patch(schema_patch, region)
-    except IOError as e:
+                OTHER_SCHEMA_MANAGER.patch(schema_patch, region)
+    except OSError as e:
         if e.errno == 2:
             LOGGER.error("Override spec file not found: %s", filename)
-            sys.exit(1)
         elif e.errno == 21:
             LOGGER.error(
                 "Override spec file references a directory, not a file: %s",
                 filename,
             )
-            sys.exit(1)
         elif e.errno == 13:
             LOGGER.error(
                 "Permission denied when accessing override spec file: %s", filename
             )
-            sys.exit(1)
+        else:
+            LOGGER.error(
+                "Failed to load override spec file %s: %s", filename, e
+            )
+        sys.exit(1)
     except ValueError as err:
         LOGGER.error("Override spec file %s is malformed: %s", filename, err)
         sys.exit(1)
