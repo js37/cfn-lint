@@ -364,6 +364,66 @@ def template():
                 # ),
             ],
         ),
+        (
+            # a sibling unresolvable (dynamic reference) must not suppress
+            # the mismatched literal (I3510 bypass regression)
+            {
+                "Action": ["cloudformation:CreateStack"],
+                "Resource": [
+                    "arn:aws:logs:us-east-1:123456789012:stack/dne/*",
+                    "{{resolve:ssm:/My/resources/kms_key_arn}}",
+                ],
+            },
+            [
+                ValidationError(
+                    "action 'cloudformation:CreateStack' "
+                    "requires a resource of "
+                    "['arn:${Partition}:cloudformation:${Region}:${Account}:stack/.*']",
+                    rule=StatementResources(),
+                    path=deque(["Resource"]),
+                ),
+            ],
+        ),
+        (
+            # a sibling unresolvable Fn::Sub must not suppress the
+            # mismatched literal (I3510 bypass regression)
+            {
+                "Action": ["cloudformation:CreateStack"],
+                "Resource": [
+                    "arn:aws:logs:us-east-1:123456789012:stack/dne/*",
+                    {"Fn::Sub": "arn:${AWS::Partition}:s3:::anything"},
+                ],
+            },
+            [
+                ValidationError(
+                    "action 'cloudformation:CreateStack' "
+                    "requires a resource of "
+                    "['arn:${Partition}:cloudformation:${Region}:${Account}:stack/.*']",
+                    rule=StatementResources(),
+                    path=deque(["Resource"]),
+                ),
+            ],
+        ),
+        (
+            # a sibling parameter Ref must not suppress the mismatched
+            # literal (I3510 bypass regression)
+            {
+                "Action": ["cloudformation:CreateStack"],
+                "Resource": [
+                    "arn:aws:logs:us-east-1:123456789012:stack/dne/*",
+                    {"Ref": "MyParameter"},
+                ],
+            },
+            [
+                ValidationError(
+                    "action 'cloudformation:CreateStack' "
+                    "requires a resource of "
+                    "['arn:${Partition}:cloudformation:${Region}:${Account}:stack/.*']",
+                    rule=StatementResources(),
+                    path=deque(["Resource"]),
+                ),
+            ],
+        ),
     ],
 )
 def test_rule(instance, expected, rule, validator):
