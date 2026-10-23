@@ -36,9 +36,22 @@ class EqualParameter:
         self.hash: str = get_hash(value)
 
     def __eq__(self, __o: Any):
+        # When compared to a string we treat the string as a *hash* of a Ref
+        # (used by ``ref_hash in c_equals.parameters`` lookups), not as a raw
+        # parameter value. A raw parameter value cannot meaningfully be
+        # compared to this object -- callers must resolve both sides to
+        # concrete values and compare those. Keeping the comparison here
+        # restricted to hash-vs-hash prevents the previous type-confusion
+        # bug where ``value == EqualParameter`` (a str compared to this
+        # object) was silently always False.
         if isinstance(__o, str):
             return self.hash == __o
-        return self.hash == __o.hash
+        if isinstance(__o, EqualParameter):
+            return self.hash == __o.hash
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(self.hash)
 
     @property
     def satisfiable(self) -> bool:
@@ -166,12 +179,27 @@ class Equal:
         """Do an equals based on the provided scenario"""
         if self._is_static in [True, False]:
             return self._is_static
-        for scenario, value in scenarios.items():
-            if isinstance(self._left, EqualParameter):
-                if scenario == self._left:
-                    return value == self._right
-            if isinstance(self._right, EqualParameter):
-                if scenario == self._right:
-                    return value == self._left
 
-        raise ValueError("An appropriate scenario was not found")
+        # Resolve both sides to concrete string values using the scenarios map
+        # (which maps the hash of a Ref to the resolved parameter value).
+        # Comparing a raw string value to an ``EqualParameter`` directly is a
+        # type confusion -- it falls back to comparing a parameter value to a
+        # sha1 hex digest and is effectively always False. Instead, require
+        # that every ``EqualParameter`` side has a resolved value in the
+        # scenarios map before we attempt the comparison.
+        def _resolve(side: EqualParameter | str) -> str | None:
+            if isinstance(side, str):
+                return side
+            return scenarios.get(side.hash)
+
+        left = _resolve(self._left)
+        right = _resolve(self._right)
+
+        if left is None or right is None:
+            # We don't have enough information to decide the equality --
+            # at least one ``Ref`` side has no resolved value in the
+            # supplied scenarios. Signal this to the caller so it can
+            # treat the result as unknown rather than silently False.
+            raise ValueError("An appropriate scenario was not found")
+
+        return left == right

@@ -449,16 +449,39 @@ class Conditions:
                                 )
 
                     if ref_hash in c_equals.parameters:
-                        found_params = {ref_hash: value}
+                        # Accumulate every matching Ref value. For an
+                        # ``Fn::Equals`` between two ``Ref``s we need both
+                        # resolved values before we can decide the equality
+                        # -- overwriting here silently discarded one side
+                        # and caused the equals to always be pinned False.
+                        found_params[ref_hash] = value
 
                 if not found_params:
                     continue
 
+                # If any ``EqualParameter`` side of this equals has not been
+                # resolved to a concrete value, we cannot decide its truth
+                # value from the supplied scenarios. Leave the equals symbol
+                # unpinned so the SAT solver considers both branches instead
+                # of silently collapsing to False, but still apply the
+                # condition's own CNF below so the condition itself is
+                # constrained to the requested value.
+                equal_params_resolved = all(
+                    param.hash in found_params for param in c_equals.parameters
+                )
+
                 at_least_one_param_found = True
-                if c_equals.test(found_params):
-                    cnf.add_prop(Symbol(c_equals.hash))
-                else:
-                    cnf.add_prop(Not(Symbol(c_equals.hash)))
+                if equal_params_resolved:
+                    try:
+                        equals_result = c_equals.test(found_params)
+                    except ValueError as err:
+                        raise UnknownSatisfisfaction(
+                            f"Can't resolve satisfaction for {condition_name!r}"
+                        ) from err
+                    if equals_result:
+                        cnf.add_prop(Symbol(c_equals.hash))
+                    else:
+                        cnf.add_prop(Not(Symbol(c_equals.hash)))
 
                 if opt:
                     cnf.add_prop(
