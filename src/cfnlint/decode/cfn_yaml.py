@@ -41,6 +41,17 @@ FN_PREFIX = "Fn::"
 # templates whose alias-resolved size exceeds this many nodes.
 _MAX_EXPANDED_NODES = 250_000
 
+# Hard cap on how deeply YAML merge keys ("<<") may nest during construction.
+# Each level can in principle double its parent's materialised entry list, so
+# we bound depth independently of the entry-count cap.
+_MAX_MERGE_DEPTH = 100
+
+# Hard cap on the input size (in bytes/characters) that cfn-lint will attempt
+# to parse as YAML.  Templates larger than this are rejected before any
+# construction work is done; this is well above every realistic
+# CloudFormation template while still protecting against pathological inputs.
+_MAX_TEMPLATE_SIZE = 50 * 1024 * 1024
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -91,13 +102,127 @@ class NodeConstructor(SafeConstructor):
         # Call the base class constructor
         super().__init__()
         self.filename = filename
+        # Cumulative count of entries produced by merge-key expansion across
+        # the whole document, and the current merge-nesting depth.  These
+        # bound YAML merge-key ("<<") amplification *during* construction,
+        # before the amplified entry list is materialised and iterated.
+        self._merge_expanded_entries = 0
+        self._merge_depth = 0
+
+    def _raise_merge_amplification(self, node, message):
+        start_mark = getattr(node, "start_mark", None)
+        line = start_mark.line if start_mark is not None else 0
+        column = start_mark.column if start_mark is not None else 0
+        raise CfnParseError(
+            self.filename,
+            [
+                build_match(
+                    filename=self.filename,
+                    message=message,
+                    line_number=line,
+                    column_number=column,
+                    key="",
+                )
+            ],
+        )
 
     def flatten_mapping(self, node):
-        # Rewrote to handle merging and overwriting keys
-        if any(key_node.tag == "tag:yaml.org,2002:merge" for key_node, _ in node.value):
-            super().flatten_mapping(node)
-            setattr(node, "using_merge", True)
-        super().flatten_mapping(node)
+        # Rewrote to handle merging and overwriting keys, and to bound YAML
+        # merge-key ("<<") amplification during construction.
+        #
+        # PyYAML's SafeConstructor.flatten_mapping materialises the merged
+        # mapping's entry list via ``node.value = merge + node.value``.  An
+        # aliased anchor resolves to the *same* MappingNode object, so a
+        # construct like ``<<: [*prev, *prev]`` doubles the entry list at
+        # each level, producing 2**depth entries from a tiny template.  We
+        # therefore reimplement the upstream algorithm here with three
+        # guards: a cumulative entry-count cap across the whole document,
+        # a merge-nesting depth cap, and de-duplication of merge sources by
+        # node identity so a repeated reference inside one ``<<`` sequence
+        # is counted (and merged) only once.
+        if self._merge_depth >= _MAX_MERGE_DEPTH:
+            self._raise_merge_amplification(
+                node,
+                (
+                    "YAML merge-key nesting exceeds "
+                    f"{_MAX_MERGE_DEPTH} levels; refusing to expand (possible "
+                    "merge-key amplification)"
+                ),
+            )
+        self._merge_depth += 1
+        try:
+            merge = []
+            index = 0
+            using_merge = False
+            while index < len(node.value):
+                key_node, value_node = node.value[index]
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    using_merge = True
+                    del node.value[index]
+                    if isinstance(value_node, MappingNode):
+                        self.flatten_mapping(value_node)
+                        merge.extend(value_node.value)
+                        self._account_merge_entries(value_node, len(value_node.value))
+                    elif isinstance(value_node, SequenceNode):
+                        submerge = []
+                        seen_ids: set[int] = set()
+                        for subnode in value_node.value:
+                            if not isinstance(subnode, MappingNode):
+                                raise ConstructorError(
+                                    "while constructing a mapping",
+                                    node.start_mark,
+                                    (
+                                        "expected a mapping for merging, "
+                                        f"but found {subnode.id}"
+                                    ),
+                                    subnode.start_mark,
+                                )
+                            # Reject repeated references to the same anchored
+                            # mapping inside one ``<<`` sequence: merging the
+                            # same node twice adds no information and is the
+                            # primary amplification primitive.
+                            if id(subnode) in seen_ids:
+                                continue
+                            seen_ids.add(id(subnode))
+                            self.flatten_mapping(subnode)
+                            submerge.append(subnode.value)
+                        submerge.reverse()
+                        for value in submerge:
+                            merge.extend(value)
+                            self._account_merge_entries(value_node, len(value))
+                    else:
+                        raise ConstructorError(
+                            "while constructing a mapping",
+                            node.start_mark,
+                            (
+                                "expected a mapping or list of mappings for "
+                                f"merging, but found {value_node.id}"
+                            ),
+                            value_node.start_mark,
+                        )
+                elif key_node.tag == "tag:yaml.org,2002:value":
+                    key_node.tag = "tag:yaml.org,2002:str"
+                    index += 1
+                else:
+                    index += 1
+            if merge:
+                node.value = merge + node.value
+            if using_merge:
+                setattr(node, "using_merge", True)
+        finally:
+            self._merge_depth -= 1
+
+    def _account_merge_entries(self, node, count):
+        self._merge_expanded_entries += count
+        if self._merge_expanded_entries > _MAX_EXPANDED_NODES:
+            self._raise_merge_amplification(
+                node,
+                (
+                    "YAML merge-key expansion produced more than "
+                    f"{_MAX_EXPANDED_NODES} entries; refusing to expand "
+                    "(possible merge-key amplification)"
+                ),
+            )
 
     # To support lazy loading, the original constructors first yield
     # an empty object, then fill them in when iterated. Due to
@@ -442,6 +567,26 @@ def loads(yaml_string, fname=None):
     """
     Load the given YAML string
     """
+    # Reject obviously oversized inputs before invoking the YAML parser.
+    # This bounds the amount of work any single parse can do and complements
+    # the merge-key amplification guards in NodeConstructor.flatten_mapping.
+    if isinstance(yaml_string, (str, bytes, bytearray)):
+        if len(yaml_string) > _MAX_TEMPLATE_SIZE:
+            raise CfnParseError(
+                fname,
+                [
+                    build_match(
+                        filename=fname,
+                        message=(
+                            f"Template exceeds the maximum supported size of "
+                            f"{_MAX_TEMPLATE_SIZE} bytes"
+                        ),
+                        line_number=0,
+                        column_number=0,
+                        key="",
+                    )
+                ],
+            )
     try:
         loader = CfnFullLoader(yaml_string, fname)
         loader.add_multi_constructor("!", multi_constructor)
