@@ -135,5 +135,5 @@ class TestManagerPatch(BaseTestCase):
             # Check that provider manager patch was called for each region
             self.assertEqual(mock_provider_manager.patch.call_count, 2)
 
-            # Check that other manager patch was called once (with the last region)
-            mock_other_manager.patch.assert_called_once()
+            # Check that other manager patch was called for each region
+            self.assertEqual(mock_other_manager.patch.call_count, 2)
