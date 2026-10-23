@@ -527,11 +527,11 @@ def multipleOf(
         return
 
     if isinstance(dB, float):
-        quotient = t_instance / dB
         try:
+            quotient = t_instance / dB
             failed = int(quotient) != quotient
         except OverflowError:
-            pass
+            failed = True
     else:
         failed = t_instance % dB
 
