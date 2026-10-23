@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import subprocess
+from urllib.parse import urlparse
 
 import cfnlint
 import cfnlint.data.AdditionalSpecs
@@ -110,10 +111,51 @@ def update_documentation(rules):
         new_file.write("\n\\* experimental rules\n")
 
 
+# Hosts that follow-on per-service URLs returned by the service-reference
+# index document are permitted to be fetched from. The index itself is served
+# by servicereference.us-east-1.amazonaws.com and currently links back to the
+# same host; the allowlist is kept small and explicit so that a compromised or
+# MITM'd index cannot redirect this maintenance job to arbitrary origins
+# (including local file:// URLs or link-local metadata endpoints).
+_IAM_POLICIES_INDEX_URL = "https://servicereference.us-east-1.amazonaws.com"
+_IAM_POLICIES_ALLOWED_HOSTS = frozenset(
+    {
+        "servicereference.us-east-1.amazonaws.com",
+    }
+)
+
+
+def _validate_iam_policies_url(candidate):
+    """Validate a per-service URL from the service-reference index.
+
+    The URL must be a well-formed ``https://`` URL whose hostname is in the
+    committed allowlist. Anything else (``file://``, ``http://``, missing
+    scheme/host, or an unknown host) is rejected before it reaches
+    ``urlopen``.
+    """
+    if not isinstance(candidate, str) or not candidate:
+        raise ValueError(
+            "service-reference entry is missing a 'url' value"
+        )
+    parsed = urlparse(candidate)
+    if parsed.scheme != "https":
+        raise ValueError(
+            f"refusing to fetch service-reference URL with non-https scheme: "
+            f"{candidate!r}"
+        )
+    hostname = parsed.hostname
+    if hostname is None or hostname.lower() not in _IAM_POLICIES_ALLOWED_HOSTS:
+        raise ValueError(
+            f"refusing to fetch service-reference URL from unexpected host: "
+            f"{candidate!r}"
+        )
+    return candidate
+
+
 def update_iam_policies():
     """update iam policies file"""
 
-    url = "https://servicereference.us-east-1.amazonaws.com"
+    url = _IAM_POLICIES_INDEX_URL
 
     filename = os.path.join(
         os.path.dirname(cfnlint.data.AdditionalSpecs.__file__), "Policies.json"
@@ -176,7 +218,11 @@ def update_iam_policies():
     data = {}
     for service in services:
         name = service.get("service")
-        content = json.loads(get_url_content(service.get("url")))
+        # The per-service URL is attacker-controlled if the index response is
+        # compromised. Validate scheme+host against a committed allowlist
+        # before handing it to urlopen (CWE-918).
+        service_url = _validate_iam_policies_url(service.get("url"))
+        content = json.loads(get_url_content(service_url))
         data[name] = _processes_a_service(content)
 
     with open(filename, "w", encoding="utf-8") as f:
