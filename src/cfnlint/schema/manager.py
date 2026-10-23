@@ -26,7 +26,7 @@ from cfnlint.helpers import (
     save_metadata,
     url_has_newer_version,
 )
-from cfnlint.schema._exceptions import ResourceNotFoundError
+from cfnlint.schema._exceptions import ResourceNotFoundError, SchemaNotFoundError
 from cfnlint.schema._getatts import AttributeDict
 from cfnlint.schema._lock import file_lock
 from cfnlint.schema._schema import Schema
@@ -60,11 +60,25 @@ class ProviderSchemaManager:
             _cache = Path(get_cache_dir())
             self._providers_dir = providers_dir or _cache / "providers"
             self._resources_dir = resources_dir or _cache / "resources"
+            self._explicit_dirs = True
         else:
             self._providers_dir, self._resources_dir = self._resolve_schema_dirs()
+            self._explicit_dirs = False
         self._registry_schemas: dict[str, Schema] = {}
         self._provider_schema_modules: dict[str, dict[str, str]] = {}
         self._sam_schema_module: dict[str, str] | None = None
+        # Track whether a cache-completeness check has been performed in this
+        # process so a full re-scan isn't repeated for every region loaded.
+        self._cache_integrity_checked = False
+        # Emit a one-time informational message naming the corpus directory
+        # actually in use. This makes it obvious which cache or bundle a run
+        # is reading from, which is important for diagnosing cases where the
+        # schema corpus has been emptied or truncated.
+        LOGGER.info(
+            "Using cfn-lint schema corpus: providers=%s resources=%s",
+            self._providers_dir,
+            self._resources_dir,
+        )
         self.reset()
 
     @staticmethod
@@ -123,6 +137,7 @@ class ProviderSchemaManager:
         self._removed_types: list[str] = []
         self._provider_schema_modules = {}
         self._sam_schema_module = None
+        self._cache_integrity_checked = False
         self.get_resource_schema.cache_clear()
         self.get_resource_types.cache_clear()
         self.get_type_getatts.cache_clear()
@@ -155,20 +170,90 @@ class ProviderSchemaManager:
             region: Region name (e.g. 'us-east-1')
         Returns:
             Dict mapping resource type to schema hash
+        Raises:
+            SchemaNotFoundError: when the provider index for the requested
+                region (and the us-east-1 fallback) cannot be read.
         """
         if region not in self._provider_schema_modules:
             if not (self._providers_dir / "us-east-1.json").exists():
                 self.update(force=False)
-            provider_file = self._providers_dir / f"{region}.json"
-            if not provider_file.exists():
-                provider_file = self._providers_dir / "us-east-1.json"
-            try:
-                with open(provider_file, "r", encoding="utf-8") as f:
-                    self._provider_schema_modules[region] = json.load(f)
-            except FileNotFoundError:
-                self._provider_schema_modules[region] = {}
-            self._provider_schema_modules[region].update(self._load_sam_module())
+            self._read_provider_index(region)
+            # Once an index has been successfully loaded, verify that the
+            # resources/ corpus actually contains the hashes it references.
+            # If any are missing, force a re-download rather than silently
+            # degrading to "no schemas available" for those types. The
+            # update path calls self.reset(), so re-read the index afterwards
+            # if a repair occurred.
+            if self._verify_resource_corpus(region):
+                self._read_provider_index(region)
         return self._provider_schema_modules[region]
+
+    def _read_provider_index(self, region: str) -> None:
+        """Read the provider index JSON for ``region`` into the cache dict."""
+        provider_file = self._providers_dir / f"{region}.json"
+        if not provider_file.exists():
+            provider_file = self._providers_dir / "us-east-1.json"
+        try:
+            with open(provider_file, "r", encoding="utf-8") as f:
+                self._provider_schema_modules[region] = json.load(f)
+        except FileNotFoundError as e:
+            # Fail closed: a missing provider index means we have no idea
+            # which resource types exist, and silently substituting {}
+            # here previously disabled property validation for every
+            # resource. Treat this as a fatal configuration error.
+            LOGGER.error(
+                "cfn-lint provider index %s is missing; schema corpus "
+                "appears to be incomplete or damaged.",
+                provider_file,
+            )
+            raise SchemaNotFoundError(str(provider_file)) from e
+        self._provider_schema_modules[region].update(self._load_sam_module())
+
+    def _verify_resource_corpus(self, region: str) -> bool:
+        """Check that the resources/ directory contains every hash referenced
+        by the provider index for ``region``. If any are missing, trigger a
+        schema re-download so the cache is repaired instead of silently
+        validating against an empty set of schemas.
+
+        This is a one-shot check per process; subsequent calls short-circuit.
+
+        Returns:
+            True if a repair update was triggered (callers may need to
+            reload cached provider data); False otherwise.
+        """
+        if self._cache_integrity_checked:
+            return False
+        self._cache_integrity_checked = True
+        provider_types = self._provider_schema_modules.get(region, {})
+        if not provider_types:
+            return False
+        if not self._resources_dir.exists():
+            LOGGER.warning(
+                "cfn-lint resources directory %s is missing; "
+                "forcing schema re-download.",
+                self._resources_dir,
+            )
+            self.update(force=True)
+            return True
+        missing: list[str] = []
+        for schema_hash in provider_types.values():
+            if not schema_hash:
+                continue
+            if not (self._resources_dir / f"{schema_hash}.json").is_file():
+                missing.append(schema_hash)
+                if len(missing) >= 5:
+                    break
+        if missing:
+            LOGGER.warning(
+                "cfn-lint schema cache is incomplete (missing %d or more "
+                "schema files, e.g. %s under %s); forcing re-download.",
+                len(missing),
+                missing[0],
+                self._resources_dir,
+            )
+            self.update(force=True)
+            return True
+        return False
 
     def load_registry_schemas(self, path: str) -> None:
         """Load extra registry schemas from a directory
@@ -227,7 +312,16 @@ class ProviderSchemaManager:
                     hash_to_regions[schema_hash] = []
                     hash_to_schema[schema_hash] = schema
                 except ResourceNotFoundError:
+                    # The provider index did not actually have this type
+                    # for this region (e.g. removed via a patch). This is
+                    # expected; continue checking the remaining regions.
                     continue
+                except SchemaNotFoundError:
+                    # The provider index claimed this type exists but the
+                    # schema body is missing or unreadable. Fail closed:
+                    # silently continuing here previously turned cfn-lint
+                    # into a no-op that exited 0 on broken templates.
+                    raise
 
             hash_to_regions[schema_hash].append(region)
 
@@ -283,13 +377,29 @@ class ProviderSchemaManager:
         if not schema_hash:
             raise ResourceNotFoundError(resource_type, region)
 
+        schema_file = self._resources_dir / f"{schema_hash}.json"
         try:
-            schema_file = self._resources_dir / f"{schema_hash}.json"
             with open(schema_file, "r", encoding="utf-8") as f:
                 self._schemas[region][resource_type] = Schema(json.load(f))
             return self._schemas[region][resource_type]
-        except Exception as e:
-            raise ResourceNotFoundError(resource_type, region) from e
+        except FileNotFoundError as e:
+            # The provider index claims this type exists but the body is
+            # absent on disk. Distinguish this case from "unknown resource
+            # type" so callers can decide whether to fail the run.
+            raise SchemaNotFoundError(str(schema_file)) from e
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            # Permission denied, truncated/invalid JSON, or any other read
+            # or decode failure. These are integrity problems with the local
+            # schema corpus; surface them loudly rather than silently turning
+            # the type into "has no schema" (which disables validation).
+            LOGGER.error(
+                "Failed to load schema %s for %s in %s: %s",
+                schema_file,
+                resource_type,
+                region,
+                e,
+            )
+            raise SchemaNotFoundError(str(schema_file)) from e
 
     @lru_cache(maxsize=None)
     def get_resource_types(self, region: str) -> list[str]:
