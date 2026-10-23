@@ -5,8 +5,7 @@ SPDX-License-Identifier: MIT-0
 
 from typing import Any
 
-import regex as re
-
+from cfnlint.helpers_regex import safe_regex_match
 from cfnlint.jsonschema import ValidationResult, Validator
 from cfnlint.jsonschema._keywords import pattern
 from cfnlint.rules import CloudFormationLintRule
@@ -43,7 +42,10 @@ class Pattern(CloudFormationLintRule):
         if not validator.context.allow_exceptions:
             return False
         for exception in self.config["exceptions"]:
-            if re.match(exception, instance):
+            # The exception pattern comes from the user's cfn-lint config
+            # file but the instance can come from the template; bound the
+            # match to prevent catastrophic backtracking (CWE-1333).
+            if safe_regex_match(exception, instance):
                 return True
         return False
 

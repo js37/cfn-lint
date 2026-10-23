@@ -3,10 +3,9 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
-import regex as re
-
 from cfnlint._typing import RuleMatches
 from cfnlint.helpers import VALID_PARAMETER_TYPES_LIST
+from cfnlint.helpers_regex import safe_regex_match
 from cfnlint.rules import CloudFormationLintRule, RuleMatch
 from cfnlint.template import Template
 
@@ -26,16 +25,17 @@ class Default(CloudFormationLintRule):
     def check_allowed_pattern(self, allowed_value, allowed_pattern, path):
         """
         Check allowed value against allowed pattern
+
+        Both ``allowed_pattern`` and ``allowed_value`` come verbatim from the
+        template, so the match is bounded (subject length cap + regex engine
+        timeout) via ``safe_regex_match`` to prevent catastrophic
+        backtracking (CWE-1333). On timeout, regex error, or oversized
+        subject the check is skipped (logged at debug) rather than reported.
         """
         message = "Default should be allowed by AllowedPattern"
-        try:
-            if not re.match(allowed_pattern, str(allowed_value)):
-                return [RuleMatch(path, message)]
-        except re.error as ex:
-            self.logger.debug(
-                'Regex pattern "%s" isn\'t supported by Python: %s', allowed_pattern, ex
-            )
-
+        result = safe_regex_match(allowed_pattern, allowed_value)
+        if result is False:
+            return [RuleMatch(path, message)]
         return []
 
     def check_min_value(self, allowed_value, min_value, path):
