@@ -69,9 +69,12 @@ class TestUpdateIamPolicies(BaseTestCase):
             json.dumps(cloudformation),
         ]
 
-        builtin_module_name = "builtins"
-
-        with patch("{}.open".format(builtin_module_name)) as mock_builtin_open:
+        with (
+            patch("cfnlint.maintenance.tempfile.mkstemp") as mock_mkstemp,
+            patch("cfnlint.maintenance.os.fdopen") as mock_fdopen,
+            patch("cfnlint.maintenance.os.replace") as mock_replace,
+        ):
+            mock_mkstemp.return_value = (99, "/tmp/Policies.json.tmp")
             cfnlint.maintenance.update_iam_policies()
             mock_json_dump.assert_called_with(
                 {
@@ -92,8 +95,29 @@ class TestUpdateIamPolicies(BaseTestCase):
                         },
                     }
                 },
-                mock_builtin_open.return_value.__enter__.return_value,
+                mock_fdopen.return_value.__enter__.return_value,
                 indent=1,
                 separators=(",", ": "),
                 sort_keys=True,
             )
+            self.assertTrue(mock_replace.called)
+
+    @patch("cfnlint.maintenance.get_url_content")
+    def test_update_iam_policies_rejects_bad_url_scheme(self, mock_content):
+        """A non-https url in the index response must be rejected."""
+
+        services = [{"service": "foo", "url": "file:///etc/passwd"}]
+        mock_content.side_effect = [json.dumps(services)]
+
+        with self.assertRaises(ValueError):
+            cfnlint.maintenance.update_iam_policies()
+
+    @patch("cfnlint.maintenance.get_url_content")
+    def test_update_iam_policies_rejects_bad_url_host(self, mock_content):
+        """An https url on an unexpected host must be rejected."""
+
+        services = [{"service": "foo", "url": "https://evil.example.com/foo.json"}]
+        mock_content.side_effect = [json.dumps(services)]
+
+        with self.assertRaises(ValueError):
+            cfnlint.maintenance.update_iam_policies()
