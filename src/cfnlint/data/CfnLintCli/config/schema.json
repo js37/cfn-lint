@@ -130,10 +130,6 @@
    ],
    "type": "string"
   },
-  "output_file": {
-   "description": "Path to the file to write the main output to",
-   "type": "string"
-  },
   "override_spec": {
    "description": "Path to spec file to override with",
    "type": "string"

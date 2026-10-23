@@ -1148,7 +1148,12 @@ class ConfigMixIn(TemplateArgs, CliArgs, ConfigFileArgs):
 
     @property
     def output_file(self):
-        return self._get_argument_value("output_file", False, True)
+        # ``output_file`` is intentionally operator-only: it is sourced from the
+        # CLI / programmatic API only, never from a project ``.cfnlintrc``
+        # discovered in the current working directory. Honouring a
+        # config-file-supplied path would let an untrusted repository redirect
+        # the report to any file the linting user can write.
+        return self._get_argument_value("output_file", False, False)
 
     @property
     def registry_schemas(self):

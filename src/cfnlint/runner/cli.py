@@ -160,12 +160,36 @@ class Runner:
         output = formatter.print_matches(matches, self.rules, config=self.config)
         if output:
             if self.config.output_file:
-                with open(self.config.output_file, "w") as output_file:
-                    output_file.write(output)
+                self._write_output_file(self.config.output_file, output)
             else:
                 print(output)
 
         self._exit(matches)
+
+    @staticmethod
+    def _write_output_file(path: str, output: str) -> None:
+        """Write ``output`` to ``path`` without following symlinks.
+
+        ``output_file`` is only reachable via the CLI / programmatic API, but a
+        symlink at the destination path can still redirect the write to an
+        unrelated file. Open with ``O_NOFOLLOW`` (where supported) so that if
+        the final path component is a symlink the write fails rather than
+        silently truncating the symlink target. The file is also created with
+        a conservative 0600 mode in case it did not already exist.
+        """
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        flags |= nofollow
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError as e:
+            # ELOOP: last path component is a symlink and O_NOFOLLOW was set.
+            # Surface a clear error instead of writing through the link.
+            raise CfnLintExitException(
+                f"Cannot write output file {path!r}: {e}", 1
+            ) from e
+        with os.fdopen(fd, "w") as output_file:
+            output_file.write(output)
 
     def _exit(self, matches: list[Match]) -> int:
         """Determine exit code"""
