@@ -240,12 +240,17 @@ class Runner:
             return
 
         if self.config.parameter_files:
+            linted_with_parameters = False
             for parameter_config, matches in expand_parameter_files(self.config):
                 if not parameter_config:
                     yield from matches
                     continue
 
                 yield from run_template_by_file_paths(parameter_config, self.rules)
+                linted_with_parameters = True
+
+            if linted_with_parameters:
+                return
 
         yield from run_template_by_file_paths(self.config, self.rules)
 
