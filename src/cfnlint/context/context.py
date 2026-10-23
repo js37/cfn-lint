@@ -489,20 +489,22 @@ def _nested_stack_get_atts(filename: str, template_url: str) -> None | Attribute
         from cfnlint.decode import decode
 
         (tmp, matches) = decode(template_path)
+        if matches or tmp is None:
+            return None
+        if not isinstance(tmp, dict):
+            return None
+
+        outputs = AttributeDict()
+
+        tmp_outputs = tmp.get("Outputs")
+        if not isinstance(tmp_outputs, dict):
+            return outputs
+
+        for name, _ in tmp_outputs.items():
+            outputs[f"Outputs.{name}"] = "/properties/CfnLintStringType"
+        return outputs
     except Exception:  # noqa: E722
         return None
-    if matches or tmp is None:
-        return None
-
-    outputs = AttributeDict()
-
-    tmp_outputs = tmp.get("Outputs")
-    if not isinstance(tmp_outputs, dict):
-        return outputs
-
-    for name, _ in tmp_outputs.items():
-        outputs[f"Outputs.{name}"] = "/properties/CfnLintStringType"
-    return outputs
 
 
 @dataclass
@@ -564,7 +566,9 @@ def _init_parameters(parameters: Any) -> dict[str, Parameter]:
     for k, v in parameters.items():
         try:
             obj[k] = Parameter(v)
-        except ValueError:
+        except Exception:  # noqa: E722
+            # Skip the offending logical ID rather than discarding the
+            # whole model when a single entry raises an unexpected error.
             pass
 
     return obj
@@ -577,7 +581,11 @@ def _init_resources(resources: Any, filename: str | None = None) -> dict[str, Re
     for k, v in resources.items():
         try:
             obj[k] = Resource(v, filename)
-        except ValueError:
+        except Exception:  # noqa: E722
+            # Skip the offending logical ID rather than discarding the
+            # whole model when a single entry raises an unexpected error
+            # (for example an AttributeError bubbling up from decoding a
+            # nested-stack TemplateURL).
             pass
     return obj
 
