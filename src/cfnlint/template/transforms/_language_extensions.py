@@ -114,14 +114,24 @@ class _Transform:
             # adjust keys if needed
             if params:
                 for k, v in item.items():
+                    # Non-string mapping keys (e.g. unquoted numeric YAML
+                    # keys like `123456789012:` under Mappings) are passed
+                    # through unchanged -- parameter substitution only
+                    # applies to string keys.
+                    if not isinstance(k, str):
+                        continue
                     _, new_k = self._replace_string_params(k, params)
                     if new_k != k:
                         del obj[k]
                         obj[new_k] = v
 
             for k, v in deepcopy(obj).items():
-                # see if key matches Fn::ForEach
-                if re.match(FUNCTION_FOR_EACH, k):
+                # see if key matches Fn::ForEach. Non-string keys (e.g.
+                # integers used as Mappings sub-keys) cannot be Fn::ForEach
+                # directives and must not be fed to ``re.match`` because
+                # that raises ``TypeError`` and aborts the whole transform,
+                # which would skip every lint rule for the template.
+                if isinstance(k, str) and re.match(FUNCTION_FOR_EACH, k):
                     # only translate the foreach if its valid
                     foreach = _ForEach(k, v, self._collections)
                     # get the values will flatten the foreach
