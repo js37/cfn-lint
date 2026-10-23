@@ -24,6 +24,10 @@ def template():
         "Resources": {
             "MySqs": {
                 "Type": "AWS::SQS::Queue",
+                "Metadata": {
+                    "aws:asset:path": "asset.abc123",
+                    "aws:asset:property": "Code",
+                },
             },
             "CDK": {
                 "Type": "AWS::CDK::Metadata",

@@ -5,6 +5,8 @@ Resources:
 
   S3BadBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      aws:asset:path: asset.abc123
     Properties:
       AccessControl: Private
       NotificationConfiguration:

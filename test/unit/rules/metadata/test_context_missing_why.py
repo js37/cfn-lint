@@ -22,6 +22,7 @@ class TestContextMissingWhy(BaseTestCase):
             "  Notifier:\n"
             "    Type: AWS::SNS::Topic\n"
             "    Metadata:\n"
+            "      aws:asset:path: asset.abc123\n"
             f"      {CONTEXT_KEY}:\n"
             "        must:\n"
             "          - at least one subscriber\n"

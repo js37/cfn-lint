@@ -20,6 +20,9 @@ def template():
         "Resources": {
             "MyResource": {
                 "Type": "AWS::S3::Bucket",
+                "Metadata": {
+                    "aws:asset:path": "asset.abc123",
+                },
             },
             "CDK": {
                 "Type": "AWS::CDK::Metadata",

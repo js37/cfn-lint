@@ -24,6 +24,7 @@ class TestContextSchemaRules(BaseTestCase):
             "  Fn:\n"
             "    Type: AWS::Lambda::Function\n"
             "    Metadata:\n"
+            "      aws:asset:path: asset.abc123\n"
             f"      {CONTEXT_KEY}:\n"
             "        why: 12345\n"
         )

@@ -19,18 +19,29 @@ class TestTargetingAndConfig(BaseTestCase):
     """Shared targeting policy and configuration options."""
 
     def test_cdk_metadata_resource_marks_template_as_cdk(self):
-        template = "Resources:\n  CDKMetadata:\n    Type: AWS::CDK::Metadata\n"
+        # A bare AWS::CDK::Metadata resource is no longer sufficient on its
+        # own; the stronger CDK heuristic also requires aws:asset:* metadata.
+        template = (
+            "Resources:\n"
+            "  CDKMetadata:\n"
+            "    Type: AWS::CDK::Metadata\n"
+            "  AssetBackedFn:\n"
+            "    Type: AWS::Lambda::Function\n"
+            "    Metadata:\n"
+            "      aws:asset:path: asset.abc123\n"
+            "      aws:asset:property: Code\n"
+        )
         self.assertEqual([], match(missing_rule(), template))
 
-    def test_cdk_metadata_logical_id_marks_template_as_cdk(self):
+    def test_cdk_metadata_logical_id_alone_does_not_mark_template_as_cdk(self):
+        # A resource merely named CDKMetadata (with a non-CDK type and no
+        # aws:asset:* metadata) is forgeable and does not suppress rules.
         template = "Resources:\n  CDKMetadata:\n    Type: AWS::SQS::Queue\n"
-        self.assertEqual([], match(missing_rule(), template))
+        self.assertNotEqual([], match(missing_rule(), template))
 
-    def test_aws_cdk_path_marks_template_as_cdk(self):
-        # Any resource carrying aws:cdk:path triggers cfn.is_cdk_template(),
-        # which short-circuits match() to return [] before incidental-ID matching.
-        # This covers CDK stacks synthesized with analyticsReporting: false
-        # (no AWS::CDK::Metadata resource).
+    def test_aws_cdk_path_alone_does_not_mark_template_as_cdk(self):
+        # A single aws:cdk:path metadata entry on an unrelated resource is
+        # forgeable and must not switch rules off template-wide.
         template = (
             "Resources:\n"
             "  StackHelperFn:\n"
@@ -38,7 +49,7 @@ class TestTargetingAndConfig(BaseTestCase):
             "    Metadata:\n"
             "      aws:cdk:path: Stack/MyResource/Provider/Resource\n"
         )
-        self.assertEqual([], match(missing_rule(), template))
+        self.assertNotEqual([], match(missing_rule(), template))
 
     def test_non_string_resource_type_is_not_low_value(self):
         template = "Resources:\n  Weird:\n    Type:\n      - AWS::SQS::Queue\n"
