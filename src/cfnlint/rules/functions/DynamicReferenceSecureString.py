@@ -5,6 +5,7 @@ SPDX-License-Identifier: MIT-0
 
 from typing import Any
 
+from cfnlint.helpers import SECRET_PROPERTY_PATHS
 from cfnlint.jsonschema import ValidationError, Validator
 from cfnlint.rules.functions._BaseFn import BaseFn
 
@@ -24,19 +25,7 @@ class DynamicReferenceSecureString(BaseFn):
     def __init__(self):
         """Init"""
         super().__init__()
-        self.exceptions = [
-            "Resources/AWS::DirectoryService::MicrosoftAD/Properties/Password",
-            "Resources/AWS::DirectoryService::SimpleAD/Properties/Password",
-            "Resources/AWS::ElastiCache::ReplicationGroup/Properties/AuthToken",
-            "Resources/AWS::IAM::User/Properties/LoginProfile/Password",
-            "Resources/AWS::KinesisFirehose::DeliveryStream/Properties/RedshiftDestinationConfiguration/Password",
-            "Resources/AWS::OpsWorks::App/Properties/AppSource/Password",
-            "Resources/AWS::OpsWorks::Stack/Properties/RdsDbInstances/*/DbPassword",
-            "Resources/AWS::OpsWorks::Stack/Properties/CustomCookbooksSource/Password",
-            "Resources/AWS::RDS::DBCluster/Properties/MasterUserPassword",
-            "Resources/AWS::RDS::DBInstance/Properties/MasterUserPassword",
-            "Resources/AWS::Redshift::Cluster/Properties/MasterUserPassword",
-        ]
+        self.exceptions = list(SECRET_PROPERTY_PATHS)
 
     def validate(self, validator: Validator, s: Any, instance: Any, schema: Any):
         if validator.context.path.cfn_path_string in self.exceptions:
