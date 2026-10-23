@@ -134,6 +134,13 @@ class Runner:
             raise UnexpectedRuleException(
                 f"Tried to append rules but got an error: {str(e)}", 1
             ) from e
+        except Exception as e:
+            # Any other error while parsing custom rules / loading modules
+            # should be surfaced as a reported UnexpectedRuleException rather
+            # than escaping as an unhandled traceback.
+            raise UnexpectedRuleException(
+                f"Tried to append rules but got an error: {str(e)}", 1
+            ) from e
 
     def validate_template(self, template: dict[str, Any]) -> Iterator[Match]:
         """
@@ -351,7 +358,18 @@ def main() -> None:
     except Exception as e:
         print(e)
         sys.exit(1)
-    runner = Runner(config)
+    try:
+        runner = Runner(config)
+    except UnexpectedRuleException as e:
+        formatter = get_formatter(config)
+        match = Match(str(e), ConfigError(), None)
+        output = formatter.print_matches([match], Rules(), config=config)
+        if output:
+            print(output)
+        sys.exit(e.exit_code)
+    except Exception as e:
+        print(e)
+        sys.exit(1)
     runner.cli()
 
 
