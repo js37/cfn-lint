@@ -13,7 +13,7 @@ from cfnlint.decode import decode
 from cfnlint.exceptions import InvalidRegionException
 from cfnlint.helpers import REGIONS
 from cfnlint.rules import Match, Rules
-from cfnlint.rules.errors import ParseError, TransformError
+from cfnlint.rules.errors import ParseError, RuleError, TransformError
 from cfnlint.template.template import Template
 
 LOGGER = logging.getLogger(__name__)
@@ -117,7 +117,17 @@ def _run_template(
 
     config.set_template_args(template)
     cfn = Template(filename, template, config.regions, config.parameters)
-    yield from _dedup(_run_template_per_config(cfn, config, rules))
+    try:
+        yield from _dedup(_run_template_per_config(cfn, config, rules))
+    except Exception as e:  # pylint: disable=broad-except
+        LOGGER.debug(
+            "Unhandled exception while running template %s", filename, exc_info=True
+        )
+        yield Match.create(
+            filename=filename or "",
+            rule=RuleError(),
+            message=f"Unhandled exception while linting template: {e}",
+        )
 
 
 def run_template_by_file_path(
