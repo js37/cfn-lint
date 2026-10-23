@@ -17,6 +17,60 @@ from cfnlint.helpers import FUNCTION_CONDITIONS
 _CONDITION = Dict[str, Union[str, Sequence["_CONDITION"]]]
 
 
+# Hard construction budgets. Before shared named-condition references were
+# used, a doubling chain of {"Condition": name} references multiplied the
+# number of allocated ``Condition`` objects as ``2**N`` from a template of
+# a few hundred bytes (CWE-770). Memoising the named conditions by name
+# closes that amplification; these caps additionally bound a single
+# template so construction can never do unbounded work.
+_MAX_CONDITION_DEPTH: int = 512
+_MAX_CONDITION_NODES: int = 100_000
+
+
+class _BuildState:
+    """Mutable state threaded through condition construction."""
+
+    __slots__ = (
+        "cache",
+        "in_progress",
+        "depth",
+        "nodes",
+        "max_depth",
+        "max_nodes",
+    )
+
+    def __init__(
+        self,
+        max_depth: int = _MAX_CONDITION_DEPTH,
+        max_nodes: int = _MAX_CONDITION_NODES,
+    ) -> None:
+        self.cache: dict[str, ConditionNamed] = {}
+        self.in_progress: set = set()
+        self.depth: int = 0
+        self.nodes: int = 0
+        self.max_depth: int = max_depth
+        self.max_nodes: int = max_nodes
+
+    def enter(self) -> None:
+        self.depth += 1
+        self.nodes += 1
+        if self.depth > self.max_depth:
+            raise ValueError(
+                f"Condition nesting depth exceeds {self.max_depth}"
+            )
+        if self.nodes > self.max_nodes:
+            raise ValueError(
+                f"Condition node budget of {self.max_nodes} exceeded"
+            )
+
+    def exit(self) -> None:
+        self.depth -= 1
+
+
+def _coerce_state(state):
+    return state if state is not None else _BuildState()
+
+
 class Condition:
     """The generic class to represent any type of Condition"""
 
@@ -28,7 +82,9 @@ class Condition:
         self,
         condition: _CONDITION,
         all_conditions: dict[str, dict],
+        state: _BuildState | None = None,
     ) -> None:
+        state = _coerce_state(state)
         if len(condition) == 1:
             for k, v in condition.items():
                 if k in FUNCTION_CONDITIONS:
@@ -37,15 +93,35 @@ class Condition:
                     if k == "Fn::Equals":
                         self._fn_equals = Equal(v)
                     elif k == "Fn::And":
-                        self._condition = ConditionAnd(v, all_conditions)
+                        self._condition = ConditionAnd(
+                            v, all_conditions, _state=state
+                        )
                     elif k == "Fn::Or":
-                        self._condition = ConditionOr(v, all_conditions)
+                        self._condition = ConditionOr(
+                            v, all_conditions, _state=state
+                        )
                     elif k == "Fn::Not":
-                        self._condition = ConditionNot(v, all_conditions)
+                        self._condition = ConditionNot(
+                            v, all_conditions, _state=state
+                        )
                 elif k == "Condition":
                     if not isinstance(v, str):
                         raise ValueError(f"Condition value {v!r} must be a string")
-                    self._condition = ConditionNamed(v, all_conditions)
+                    # Reuse the already-built ConditionNamed for this name
+                    # (or build it now and share). This avoids re-expanding
+                    # the referenced tree each time the name is used; the
+                    # CNF layer resolves named conditions by Symbol anyway.
+                    existing = state.cache.get(v)
+                    if existing is not None:
+                        self._condition = existing
+                    elif v in state.in_progress:
+                        raise ValueError(
+                            f"Condition {v!r} cycles through itself"
+                        )
+                    else:
+                        self._condition = ConditionNamed(
+                            v, all_conditions, _state=state
+                        )
                 else:
                     raise ValueError(f"Unknown key ({k}) in condition")
         else:
@@ -98,13 +174,19 @@ class ConditionList(Condition):
     """
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        _state: _BuildState | None = None,
     ) -> None:
         super().__init__()
+        state = _coerce_state(_state)
         self._conditions: list[ConditionUnnammed] = []
         self._prefix_path: str = ""
         for condition in conditions:
-            self._conditions.append(ConditionUnnammed(condition, all_conditions))
+            self._conditions.append(
+                ConditionUnnammed(condition, all_conditions, _state=state)
+            )
 
     @property
     def equals(self) -> list[Equal]:
@@ -125,9 +207,12 @@ class ConditionAnd(ConditionList):
     """Represents the logic specific to an And Condition"""
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        _state: _BuildState | None = None,
     ) -> None:
-        super().__init__(conditions, all_conditions)
+        super().__init__(conditions, all_conditions, _state=_state)
         self._prefix_path = "Fn::And"
 
     def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
@@ -153,9 +238,12 @@ class ConditionNot(ConditionList):
     """Represents the logic specific to an Not Condition"""
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        _state: _BuildState | None = None,
     ) -> None:
-        super().__init__(conditions, all_conditions)
+        super().__init__(conditions, all_conditions, _state=_state)
         self._prefix_path = "Fn::Not"
         if len(conditions) != 1:
             raise ValueError("Condition length must be 1")
@@ -179,9 +267,12 @@ class ConditionOr(ConditionList):
     """Represents the logic specific to an Or Condition"""
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        _state: _BuildState | None = None,
     ) -> None:
-        super().__init__(conditions, all_conditions)
+        super().__init__(conditions, all_conditions, _state=_state)
         self._prefix_path = "Fn::Or"
 
     def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
@@ -205,25 +296,58 @@ class ConditionOr(ConditionList):
 class ConditionUnnammed(Condition):
     """Represents an unnamed condition which is basically a nested Equals"""
 
-    def __init__(self, condition: Any, all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self,
+        condition: Any,
+        all_conditions: dict[str, dict],
+        _state: _BuildState | None = None,
+    ) -> None:
         super().__init__()
-        if isinstance(condition, dict):
-            self._init_condition(condition, all_conditions)
-        else:
-            raise ValueError("Condition must have a value that is an object")
+        state = _coerce_state(_state)
+        state.enter()
+        try:
+            if isinstance(condition, dict):
+                self._init_condition(condition, all_conditions, state=state)
+            else:
+                raise ValueError(
+                    "Condition must have a value that is an object"
+                )
+        finally:
+            state.exit()
 
 
 class ConditionNamed(Condition):
     """The parent condition that directly represents a named condition in a template"""
 
-    def __init__(self, name: str, all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self,
+        name: str,
+        all_conditions: dict[str, dict],
+        _state: _BuildState | None = None,
+    ) -> None:
         super().__init__()
-        condition = all_conditions.get(name)
-        if isinstance(condition, dict):
-            self._name = name
-            self._init_condition(condition, all_conditions)
-        else:
-            raise ValueError(f"Condition {name} must have a value that is an object")
+        state = _coerce_state(_state)
+        state.enter()
+        try:
+            condition = all_conditions.get(name)
+            if isinstance(condition, dict):
+                self._name = name
+                # Register ourselves BEFORE recursing so that nested
+                # {"Condition": name} references under the same name
+                # resolve to this shared object instead of expanding a
+                # fresh subtree. The in_progress guard rejects cycles.
+                state.cache[name] = self
+                state.in_progress.add(name)
+                try:
+                    self._init_condition(condition, all_conditions, state=state)
+                finally:
+                    state.in_progress.discard(name)
+            else:
+                raise ValueError(
+                    f"Condition {name} must have a value that is an object"
+                )
+        finally:
+            state.exit()
 
     def build_true_cnf(self, params: dict[str, Symbol]) -> Any:
         """Build a SymPy CNF for a True based scenario

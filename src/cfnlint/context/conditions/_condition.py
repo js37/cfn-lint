@@ -28,9 +28,18 @@ class Condition:
 
     @classmethod
     def create_from_instance(
-        cls, instance: Any, all_conditions: dict[str, Any]
+        cls,
+        instance: Any,
+        all_conditions: dict[str, Any],
+        _cache: "dict[str, Condition] | None" = None,
+        _in_progress: "set[str] | None" = None,
     ) -> "Condition":
         instance_hash = get_hash(instance)
+
+        if _cache is None:
+            _cache = {}
+        if _in_progress is None:
+            _in_progress = set()
 
         fn_k, fn_v = is_function(instance)
         if fn_k is None:
@@ -49,7 +58,11 @@ class Condition:
 
             condition = []
             for v in fn_v:
-                condition.append(Condition.create_from_instance(v, all_conditions))
+                condition.append(
+                    Condition.create_from_instance(
+                        v, all_conditions, _cache=_cache, _in_progress=_in_progress
+                    )
+                )
 
             cnf = None
             if fn_k == "Fn::And":
@@ -70,16 +83,42 @@ class Condition:
         if fn_k == "Condition":
             if not isinstance(fn_v, str):
                 raise ValueError(f"Condition value {fn_v!r} must be a string")
-            # Build the sub-condition for is_region/equals traversal
+            # Resolve the sub-condition by name through a shared cache so
+            # that each named condition is built at most once per top-level
+            # call. Previously this cloned ``all_conditions`` (O(N)) and
+            # re-expanded the referenced sub-tree on every reference, which
+            # multiplied the number of allocated ``Condition`` objects
+            # exponentially for chained references (CWE-770).
             sub_condition = all_conditions.get(fn_v)
-            try:
-                sub_all_conditions = all_conditions.copy()
-                del sub_all_conditions[fn_v]
-                c = Condition.create_from_instance(sub_condition, sub_all_conditions)
-            except Exception:
+            if fn_v in _in_progress:
+                # Cycle while expanding ``fn_v`` -> fall back to a dummy.
                 c = Condition.create_from_instance(
-                    {"Fn::Equals": [None, None]}, all_conditions
+                    {"Fn::Equals": [None, None]},
+                    all_conditions,
+                    _cache=_cache,
+                    _in_progress=_in_progress,
                 )
+            elif fn_v in _cache:
+                c = _cache[fn_v]
+            else:
+                _in_progress.add(fn_v)
+                try:
+                    c = Condition.create_from_instance(
+                        sub_condition,
+                        all_conditions,
+                        _cache=_cache,
+                        _in_progress=_in_progress,
+                    )
+                except Exception:
+                    c = Condition.create_from_instance(
+                        {"Fn::Equals": [None, None]},
+                        all_conditions,
+                        _cache=_cache,
+                        _in_progress=_in_progress,
+                    )
+                finally:
+                    _in_progress.discard(fn_v)
+                _cache[fn_v] = c
             # Use a Symbol for the condition name instead of the expanded CNF
             # The equivalence constraint is added in Conditions.create_from_instance
             return cls(
