@@ -30,6 +30,19 @@ LOGGER = logging.getLogger("cfnlint")
 
 _DEFAULT_RULESDIR = os.path.join(os.path.dirname(__file__), "rules")
 
+# Keys that can load code, redirect output, or change which files are linted.
+# When a `.cfnlintrc` is auto-discovered from the current working directory
+# (as opposed to being supplied via --config-file, or coming from the
+# per-user ~/.cfnlintrc), these keys are refused unless the operator
+# explicitly opts in via --allow-project-rules. See CWE-427.
+_PROJECT_UNTRUSTED_KEYS = (
+    "append_rules",
+    "custom_rules",
+    "override_spec",
+    "registry_schemas",
+    "output_file",
+)
+
 
 def configure_logging(debug_logging, info_logging):
     ch = logging.StreamHandler()
@@ -62,10 +75,12 @@ class ConfigFileArgs:
     _user_config_file = None
     _project_config_file = None
     _custom_config_file = None
+    _allow_project_rules = False
 
-    def __init__(self, schema=None, config_file=None):
+    def __init__(self, schema=None, config_file=None, allow_project_rules=False):
         # self.file_args = self.get_config_file_defaults()
         self.file_args = {}
+        self._allow_project_rules = bool(allow_project_rules)
         self.default_schema_file = Path(__file__).parent.joinpath(
             "data/CfnLintCli/config/schema.json"
         )
@@ -155,6 +170,32 @@ class ConfigFileArgs:
             project_config = self._read_config(self._project_config_file)
             LOGGER.debug("Validating Project CFNLINTRC")
             self.validate_config(project_config, self.schema)
+
+            # The project `.cfnlintrc` is auto-discovered from the current
+            # working directory and is therefore treated as untrusted input
+            # for settings that can load code, redirect output, or change the
+            # rule set. Strip those keys unless the operator opted in with
+            # --allow-project-rules (or supplied --config-file / set the keys
+            # in ~/.cfnlintrc, which bypass this code path). See CWE-427.
+            if (
+                self._project_config_file
+                and project_config
+                and not self._allow_project_rules
+            ):
+                for key in _PROJECT_UNTRUSTED_KEYS:
+                    if key in project_config:
+                        LOGGER.warning(
+                            (
+                                "Ignoring '%s' from auto-discovered project "
+                                "'%s': this key can load code or redirect "
+                                "output and is only honoured from the CLI, "
+                                "from --config-file, from ~/.cfnlintrc, or "
+                                "when --allow-project-rules is passed."
+                            ),
+                            key,
+                            self._project_config_file,
+                        )
+                        project_config.pop(key, None)
 
             LOGGER.debug("User configuration loaded as")
             LOGGER.debug("%s", user_config)
@@ -629,6 +670,21 @@ class CliArgs:
             dest="config_file",
             help="Specify the cfnlintrc file to use",
         )
+        advanced.add_argument(
+            "--allow-project-rules",
+            dest="allow_project_rules",
+            action="store_true",
+            help=(
+                "Honour `append_rules`, `custom_rules`, `override_spec`, "
+                "`registry_schemas` and `output_file` from the project "
+                "`.cfnlintrc` that is auto-discovered in the current "
+                "working directory. Off by default because those keys "
+                "load Python / redirect output and the project file is "
+                "treated as untrusted input (CWE-427). Pass this flag "
+                "only when the project is trusted; prefer "
+                "--config-file or `~/.cfnlintrc` otherwise."
+            ),
+        )
         standard.add_argument(
             "-z",
             "--custom-rules",
@@ -767,6 +823,7 @@ class ManualArgs(TypedDict, total=False):
     registry_schemas: list[str]
     template_parameters: list[dict[str, Any]]
     templates: list[str]
+    allow_project_rules: bool
 
 
 def _merge_configs(
@@ -805,7 +862,12 @@ class ConfigMixIn(TemplateArgs, CliArgs, ConfigFileArgs):
         # configure debug as soon as we can
         TemplateArgs.__init__(self, {})
         ConfigFileArgs.__init__(
-            self, config_file=self._get_argument_value("config_file", False, False)
+            self,
+            config_file=self._get_argument_value("config_file", False, False),
+            allow_project_rules=bool(
+                self._get_argument_value("allow_project_rules", False, False)
+                or self._manual_args.get("allow_project_rules")
+            ),
         )
 
     def __repr__(self):
