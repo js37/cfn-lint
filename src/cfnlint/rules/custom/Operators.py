@@ -57,7 +57,99 @@ def CreateCustomRule(
 
             return []
 
-        def _check_value(self, value, path, property_chain, cfn):
+        def _unresolved_message(self, function_name):
+            base = self.error_message or "Custom rule check could not be evaluated"
+            return (
+                f"{base} ({function_name} could not be resolved to a literal value"
+                f" at lint time; comparison against {self.property_value!r} skipped"
+                f" — a guardrail would be bypassed if the resolved value matches)"
+            )
+
+        def _resolve_sub(self, value):
+            """Statically resolve an Fn::Sub value when possible.
+
+            ``Fn::Sub`` is either a plain string or a two-element list
+            ``[template, {var: value, ...}]``. We only resolve when every
+            ``${...}`` reference is satisfied by a literal entry in the
+            inline substitution map (or there are no references at all).
+            """
+            substitutions = {}
+            if isinstance(value, list):
+                if len(value) < 1 or not isinstance(value[0], str):
+                    return None
+                template = value[0]
+                if len(value) >= 2 and isinstance(value[1], dict):
+                    for k, v in value[1].items():
+                        if isinstance(v, str):
+                            substitutions[k] = v
+                        else:
+                            return None
+            elif isinstance(value, str):
+                template = value
+            else:
+                return None
+
+            if "${" not in template:
+                return template
+
+            result = template
+            idx = 0
+            while True:
+                start = result.find("${", idx)
+                if start == -1:
+                    break
+                end = result.find("}", start + 2)
+                if end == -1:
+                    return None
+                name = result[start + 2 : end]
+                if name.startswith("!"):
+                    # ${!Literal} escape — resolver semantics belong to CFN.
+                    return None
+                if name in substitutions:
+                    result = (
+                        result[:start] + substitutions[name] + result[end + 1 :]
+                    )
+                    idx = start + len(substitutions[name])
+                else:
+                    return None
+            return result
+
+        def _resolve_join(self, value):
+            """Statically resolve an Fn::Join value when possible."""
+            if not isinstance(value, list) or len(value) != 2:
+                return None
+            delimiter, parts = value[0], value[1]
+            if not isinstance(delimiter, str) or not isinstance(parts, list):
+                return None
+            resolved_parts = []
+            for part in parts:
+                if isinstance(part, str):
+                    resolved_parts.append(part)
+                elif isinstance(part, dict) and len(part) == 1:
+                    if "Fn::Sub" in part:
+                        nested = self._resolve_sub(part["Fn::Sub"])
+                        if nested is None:
+                            return None
+                        resolved_parts.append(nested)
+                    else:
+                        return None
+                else:
+                    return None
+            return delimiter.join(resolved_parts)
+
+        def _resolve_ref(self, value, cfn):
+            """Statically resolve a Ref to a parameter Default when present."""
+            if not isinstance(value, str):
+                return None
+            parameters = cfn.template.get("Parameters", {}) if cfn else {}
+            if value in parameters:
+                default = parameters[value].get("Default")
+                if default is None:
+                    return None
+                return default
+            return None
+
+        def _check_value(self, value, path, property_chain, cfn, **_):
             matches = []
             if property_chain:
                 new_property_chain = self._remaining_inset_properties(property_chain)
@@ -67,6 +159,13 @@ def CreateCustomRule(
                         property_chain[0],
                         path,
                         check_value=self._check_value,
+                        check_ref=self._check_ref,
+                        check_sub=self._check_sub,
+                        check_join=self._check_join,
+                        check_split=self._check_split,
+                        check_get_att=self._check_get_att,
+                        check_find_in_map=self._check_find_in_map,
+                        check_import_value=self._check_import_value,
                         property_chain=new_property_chain,
                         cfn=cfn,
                     )
@@ -76,6 +175,70 @@ def CreateCustomRule(
                 matches.extend(self.rule_func(value, self.property_value, path))
             return matches
 
+        def _check_ref(self, value, path, property_chain, cfn, **_):
+            # Cannot descend further through an intrinsic function at lint
+            # time; the comparison only applies at the leaf.
+            if property_chain:
+                return []
+            resolved = self._resolve_ref(value, cfn)
+            if resolved is not None:
+                return self.rule_func(resolved, self.property_value, path)
+            return [
+                cfnlint.rules.RuleMatch(path, self._unresolved_message("Ref"))
+            ]
+
+        def _check_sub(self, value, path, property_chain, cfn, **_):
+            if property_chain:
+                return []
+            resolved = self._resolve_sub(value)
+            if resolved is not None:
+                return self.rule_func(resolved, self.property_value, path)
+            return [
+                cfnlint.rules.RuleMatch(path, self._unresolved_message("Fn::Sub"))
+            ]
+
+        def _check_join(self, value, path, property_chain, cfn, **_):
+            if property_chain:
+                return []
+            resolved = self._resolve_join(value)
+            if resolved is not None:
+                return self.rule_func(resolved, self.property_value, path)
+            return [
+                cfnlint.rules.RuleMatch(path, self._unresolved_message("Fn::Join"))
+            ]
+
+        def _check_split(self, value, path, property_chain, cfn, **_):
+            if property_chain:
+                return []
+            return [
+                cfnlint.rules.RuleMatch(path, self._unresolved_message("Fn::Split"))
+            ]
+
+        def _check_get_att(self, value, path, property_chain, cfn, **_):
+            if property_chain:
+                return []
+            return [
+                cfnlint.rules.RuleMatch(path, self._unresolved_message("Fn::GetAtt"))
+            ]
+
+        def _check_find_in_map(self, value, path, property_chain, cfn, **_):
+            if property_chain:
+                return []
+            return [
+                cfnlint.rules.RuleMatch(
+                    path, self._unresolved_message("Fn::FindInMap")
+                )
+            ]
+
+        def _check_import_value(self, value, path, property_chain, cfn, **_):
+            if property_chain:
+                return []
+            return [
+                cfnlint.rules.RuleMatch(
+                    path, self._unresolved_message("Fn::ImportValue")
+                )
+            ]
+
         def match_resource_properties(self, properties, _, path, cfn):
             new_property_chain = self._remaining_inset_properties(self.property_chain)
             return cfn.check_value(
@@ -83,6 +246,13 @@ def CreateCustomRule(
                 self.property_chain[0],
                 path,
                 check_value=self._check_value,
+                check_ref=self._check_ref,
+                check_sub=self._check_sub,
+                check_join=self._check_join,
+                check_split=self._check_split,
+                check_get_att=self._check_get_att,
+                check_find_in_map=self._check_find_in_map,
+                check_import_value=self._check_import_value,
                 property_chain=new_property_chain,
                 cfn=cfn,
             )
