@@ -16,7 +16,7 @@ from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.boolalg import BooleanFalse, BooleanTrue
 from sympy.logic.inference import satisfiable
 
-from cfnlint.conditions._condition import ConditionNamed
+from cfnlint.conditions._condition import ConditionNamed, _BuildState
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
@@ -42,14 +42,35 @@ class Conditions:
     def _init_conditions(self, cfn):
         conditions = cfn.template.get("Conditions")
         if isinstance(conditions, dict):
+            # Share one build state across every top-level named condition
+            # so that references to a condition that has already been built
+            # (or is currently being built) reuse the shared object instead
+            # of re-expanding the subtree.
+            state = _BuildState()
             for k, _ in conditions.items():
+                if k in self._conditions:
+                    # Already materialised as a transitive dependency of an
+                    # earlier condition; keep the shared instance.
+                    continue
+                cached = state.cache.get(k)
+                if cached is not None:
+                    self._conditions[k] = cached
+                    continue
                 try:
-                    self._conditions[k] = ConditionNamed(k, conditions)
+                    self._conditions[k] = ConditionNamed(
+                        k, conditions, _state=state
+                    )
                 except ValueError as e:
+                    # Discard any partially-registered cache entry so a
+                    # later iteration does not reuse a half-built object.
+                    state.cache.pop(k, None)
+                    state.in_progress.discard(k)
                     LOGGER.debug(
                         "Captured error while building condition %s: %s", k, str(e)
                     )
                 except Exception as e:  # pylint: disable=broad-exception-caught
+                    state.cache.pop(k, None)
+                    state.in_progress.discard(k)
                     if LOGGER.getEffectiveLevel() == logging.DEBUG:
                         error_message = traceback.format_exc()
                     else:

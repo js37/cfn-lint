@@ -52,6 +52,11 @@ class Conditions:
         obj: dict[str, Condition] = {}
         if not isinstance(conditions, dict):
             raise ValueError("Conditions must be a object")
+        # Share one build cache across every top-level named condition so
+        # that a condition referenced via ``{"Condition": name}`` is only
+        # built once per template instead of being re-expanded on every
+        # reference (CWE-770).
+        build_cache: dict[str, Condition] = {}
         for k, v in conditions.items():
             if not isinstance(k, str):
                 # Condition logical IDs must be strings (rule E8001 reports
@@ -59,14 +64,22 @@ class Conditions:
                 # table below never receives a non-string name, which would
                 # raise TypeError before any rule gets to run.
                 continue
+            if k in build_cache:
+                obj[k] = build_cache[k]
+                continue
             try:
-                other_conditions = conditions.copy()
-                del other_conditions[k]
-                obj[k] = Condition.create_from_instance(v, other_conditions)
+                in_progress: set = {k}
+                obj[k] = Condition.create_from_instance(
+                    v,
+                    conditions,
+                    _cache=build_cache,
+                    _in_progress=in_progress,
+                )
             except ValueError:
                 obj[k] = Condition.create_from_instance(
                     {"Fn::Equals": [None, None]}, conditions
                 )
+            build_cache[k] = obj[k]
 
         # Build EncodedCNF with a Symbol per condition name
         cnf = EncodedCNF()
