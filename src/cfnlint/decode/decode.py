@@ -63,9 +63,15 @@ def _decode(
                     f"Permission denied when accessing template file: {filename}",
                 )
             )
+        else:
+            LOGGER.error("Unable to read template file: %s: %s", filename, e)
+            matches.append(
+                create_match_file_error(
+                    filename, f"Unable to read {filename}: {e}"
+                )
+            )
 
-        if matches:
-            return (None, matches)
+        return (None, matches)
     except UnicodeDecodeError:
         LOGGER.error("Cannot read file contents: %s", filename)
         matches.append(
@@ -109,6 +115,14 @@ def _decode(
                         matches = [create_match_yaml_parser_error(err, filename)]
                     else:
                         matches = [create_match_json_parser_error(json_err, filename)]
+                else:
+                    matches = [
+                        create_match_file_error(
+                            filename,
+                            f"Tried to parse {filename} as JSON but got error:"
+                            f" {str(json_err)}",
+                        )
+                    ]
             except Exception as json_err:  # pylint: disable=W0703
                 LOGGER.error("Template %s is malformed: %s", filename, err.problem)
                 LOGGER.error(

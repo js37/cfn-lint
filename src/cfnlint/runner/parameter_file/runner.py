@@ -23,6 +23,21 @@ def _parse_parameter_file(
     data, matches = decode(filename)
 
     if data is None:
+        if not matches:
+            matches = [
+                Match(
+                    linenumber=1,
+                    columnnumber=1,
+                    linenumberend=1,
+                    columnnumberend=1,
+                    filename=filename,
+                    message=(
+                        f"Unable to decode parameter file {filename!r}: "
+                        "internal decoder error"
+                    ),
+                    rule=Configuration(),
+                )
+            ]
         return matches
 
     key = "ParameterKey"
