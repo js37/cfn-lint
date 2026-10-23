@@ -7,7 +7,7 @@ import itertools
 import operator
 
 from cfnlint.formatters._utils import color, colored
-from cfnlint.formatters.base import BaseFormatter
+from cfnlint.formatters.base import BaseFormatter, sanitize
 
 
 class PrettyFormatter(BaseFormatter):
@@ -20,7 +20,7 @@ class PrettyFormatter(BaseFormatter):
         return formatstr.format(
             colored(f"{pos:20}", color.reset),
             colored(f"{match.rule.id:10}", getattr(color, match.rule.severity.lower())),
-            match.message,
+            sanitize(match.message),
         )
 
     def print_matches(self, matches, rules, config):
@@ -51,7 +51,7 @@ class PrettyFormatter(BaseFormatter):
         ):
             levels = {"error": [], "warning": [], "informational": [], "unknown": []}
 
-            output.append(colored(filename, color.underline_reset))
+            output.append(colored(sanitize(filename), color.underline_reset))
             for match in file_matches:
                 level = match.rule.severity.lower()
                 if level not in ["error", "warning", "informational"]:

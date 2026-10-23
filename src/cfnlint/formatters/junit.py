@@ -3,7 +3,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
-from cfnlint.formatters.base import BaseFormatter
+from cfnlint.formatters.base import BaseFormatter, sanitize
 
 
 class JUnitFormatter(BaseFormatter):
@@ -13,7 +13,10 @@ class JUnitFormatter(BaseFormatter):
         """Format output of a failure"""
         formatstr = "{0} at {1}:{2}:{3}"
         return formatstr.format(
-            match.message, match.filename, match.linenumber, match.columnnumber
+            sanitize(match.message),
+            sanitize(match.filename),
+            match.linenumber,
+            match.columnnumber,
         )
 
     def print_matches(self, matches, rules, config):
@@ -51,7 +54,7 @@ class JUnitFormatter(BaseFormatter):
                     if match.rule.id == rule.id:
                         test_case.add_failure_info(
                             message=self._failure_format(match),
-                            failure_type=match.message,
+                            failure_type=sanitize(match.message),
                         )
                 test_cases.append(test_case)
 

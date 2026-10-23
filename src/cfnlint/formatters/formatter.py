@@ -3,7 +3,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
-from cfnlint.formatters.base import BaseFormatter
+from cfnlint.formatters.base import BaseFormatter, sanitize
 
 
 class Formatter(BaseFormatter):
@@ -14,8 +14,8 @@ class Formatter(BaseFormatter):
         formatstr = "{0} {1}\n{2}:{3}:{4}\n"
         return formatstr.format(
             match.rule.id,
-            match.message,
-            match.filename,
+            sanitize(match.message),
+            sanitize(match.filename),
             match.linenumber,
             match.columnnumber,
         )
