@@ -288,6 +288,8 @@ This linter checks the AWS CloudFormation template by processing a collection of
 
 This collection of rules can be extended with custom rules using the `--append-rules` argument.
 
+> **Security note.** Pointing `--append-rules` at a directory is equivalent to **running the Python files it contains** -- cfn-lint has to import them to register their rule classes. Only point `--append-rules` (and related keys `custom_rules`, `override_spec`, `registry_schemas`) at content you trust. For the same reason cfn-lint ignores these keys when they come from a `.cfnlintrc` that was auto-discovered in the current working directory: in CI / pre-commit flows that file can be attacker-controlled. To use them from a config file, pass the file explicitly with `--config-file /path/to/trusted.cfnlintrc`, keep them in your `~/.cfnlintrc`, or pass them directly on the command line. As a defence in depth cfn-lint also refuses to execute `.py` files under an `--append-rules` directory unless they statically declare a `CloudFormationLintRule` subclass.
+
 More information describing how rules are set up and an overview of all the Rules that are applied by this linter are documented [here](docs/rules.md).
 
 ## Custom Rules
