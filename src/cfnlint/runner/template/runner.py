@@ -133,6 +133,12 @@ def run_template_by_file_path(
         rules (Rules): The set of rules to be applied to the template.
     """
 
+    # Reset any per-template args carried over from a previously decoded
+    # template so that one template's `Metadata.cfn-lint.config` (e.g.
+    # `ignore_checks`) cannot leak into the handling (including the E0000
+    # parse-error filter below) of a different template in the same run.
+    config.set_template_args({})
+
     (template, matches) = decode(filename)  # type: ignore
     if matches:
         if ignore_bad_template or any(
