@@ -29,6 +29,26 @@ _SCALAR_TYPES = (str, int, float, bool)
 
 _ACCOUNT_ID = None
 
+# Maximum depth of nested Fn::FindInMap expressions.  Without this cap a
+# chain of nested Fn::FindInMap expressions resolves in O((M*K)**depth)
+# because each level scans the Mappings section while repeatedly
+# re-resolving its child expression.  A small, generous bound keeps
+# well-formed templates working while making the attacker-controlled
+# recursion refuse to even construct beyond a safe depth.
+_MAX_FINDINMAP_DEPTH = 8
+
+# Overall step budget for a single transform.  Even with memoization and
+# shallow copies in place, a template could still try to exhaust CPU by
+# producing a very large number of resolutions through other means.  The
+# budget is intentionally large so legitimate templates are unaffected,
+# but it guarantees the transform cannot run unbounded on a hostile
+# input.
+_TRANSFORM_STEP_BUDGET = 1_000_000
+
+# Sentinel used by the memoization cache to distinguish "no cached
+# result" from "cached result is None".
+_CACHE_MISS = object()
+
 
 class _ResolveError(Exception):
     def __init__(self, message: str, key: Any) -> None:
@@ -102,6 +122,21 @@ def language_extension(cfn: Any) -> TransformResult:
 class _Transform:
     def __init__(self) -> None:
         self._collections: MutableMapping[str, str] = {}
+        self._steps_remaining: int = _TRANSFORM_STEP_BUDGET
+
+    def _tick(self, key: Any) -> None:
+        """Charge one step against the overall transform budget.
+
+        Raised as ``_ValueError`` so ``language_extension`` surfaces it as
+        a clean ``TransformError`` match (see the ``except`` block in
+        :func:`language_extension`).
+        """
+        self._steps_remaining -= 1
+        if self._steps_remaining < 0:
+            raise _ValueError(
+                "Transform exceeded resource budget while expanding template",
+                key,
+            )
 
     def transform(self, cfn: Any) -> TransformResult:
         """Transform the template"""
@@ -120,6 +155,7 @@ class _Transform:
                         obj[new_k] = v
 
             for k, v in deepcopy(obj).items():
+                self._tick(k)
                 # see if key matches Fn::ForEach
                 if re.match(FUNCTION_FOR_EACH, k):
                     # only translate the foreach if its valid
@@ -253,9 +289,24 @@ class _ForEachValue:
             self._value = value
 
         self._hash = _hash
+        # Per-instance memoization table for ``value()``.  Keyed by
+        # ``(id(cfn), params_hash, only_params)`` so repeated calls with
+        # the same inputs do not re-resolve the whole sub-expression
+        # tree.  See _ForEachValueFnFindInMap.value for the exponential
+        # scan loop this protects.
+        self._value_cache: dict[tuple, Any] = {}
 
     @staticmethod
-    def create(obj: Any) -> _ForEachValue:
+    def create(obj: Any, _depth: int = 0) -> _ForEachValue:
+        if _depth > _MAX_FINDINMAP_DEPTH:
+            # Refuse to build a sub-expression tree deeper than the cap.
+            # Raised as ``_ValueError`` so ``language_extension`` turns
+            # it into a clean ``TransformError`` match rather than an
+            # internal traceback.
+            raise _ValueError(
+                "Fn::FindInMap nested beyond the maximum supported depth",
+                obj,
+            )
         _hash = get_hash(obj)
         if isinstance(obj, _SCALAR_TYPES):
             return _ForEachValue(_hash, obj)
@@ -267,7 +318,7 @@ class _ForEachValue:
                 if k == "Ref":
                     return _ForEachValueRef(_hash, v)
                 if k == "Fn::FindInMap":
-                    return _ForEachValueFnFindInMap(_hash, v)
+                    return _ForEachValueFnFindInMap(_hash, v, _depth=_depth + 1)
                 if k == "Fn::If":
                     return _ForEachValueFnIf(_hash, v)
 
@@ -283,9 +334,27 @@ class _ForEachValue:
     def hash(self):
         return self._hash
 
+    def _cache_key(
+        self,
+        cfn: Any,
+        params: Mapping[str, Any] | None,
+        only_params: bool,
+    ) -> tuple | None:
+        """Build a stable key for the per-instance value cache.
+
+        Returns ``None`` when the caller's state is not safely hashable;
+        in that case the caller should skip the cache rather than fall
+        back on an unreliable key.
+        """
+        try:
+            params_hash = get_hash(params) if params else ""
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        return (id(cfn), params_hash, bool(only_params))
+
 
 class _FnFindInMapDefaultValue(_ForEachValue):
-    def __init__(self, _hash: str, value: Any = None) -> None:
+    def __init__(self, _hash: str, value: Any = None, _depth: int = 1) -> None:
         super().__init__(_hash, value)
         if not isinstance(value, dict):
             raise _TypeError(
@@ -303,9 +372,9 @@ class _FnFindInMapDefaultValue(_ForEachValue):
                     "Fn::FindInMap parameter only supports 'DefaultValue'", value
                 )
             if isinstance(v, list):
-                self._value = [_ForEachValue.create(a) for a in v]
+                self._value = [_ForEachValue.create(a, _depth=_depth) for a in v]
                 return
-            self._value = _ForEachValue.create(v)
+            self._value = _ForEachValue.create(v, _depth=_depth)
 
     def value(
         self, cfn, params: Mapping[str, Any] | None = None, only_params: bool = False
@@ -319,7 +388,7 @@ class _FnFindInMapDefaultValue(_ForEachValue):
 
 
 class _ForEachValueFnFindInMap(_ForEachValue):
-    def __init__(self, _hash: str, obj: Any) -> None:
+    def __init__(self, _hash: str, obj: Any, _depth: int = 1) -> None:
         super().__init__(_hash)
         if not isinstance(obj, list):
             raise _TypeError("Fn::FindInMap should be a list", obj)
@@ -327,13 +396,18 @@ class _ForEachValueFnFindInMap(_ForEachValue):
         if len(obj) not in [3, 4]:
             raise _ValueError("Fn::FindInMap requires a list of 3 or 4 values", obj)
 
+        # ``_depth`` is forwarded so a nested Fn::FindInMap in any of the
+        # three positional slots counts against the overall depth cap
+        # enforced in ``_ForEachValue.create``.
         self._map = [
-            _ForEachValue.create(obj[0]),
-            _ForEachValue.create(obj[1]),
-            _ForEachValue.create(obj[2]),
+            _ForEachValue.create(obj[0], _depth=_depth),
+            _ForEachValue.create(obj[1], _depth=_depth),
+            _ForEachValue.create(obj[2], _depth=_depth),
         ]
         if len(obj) == 4:
-            self._map.append(_FnFindInMapDefaultValue(get_hash(obj[3]), obj[3]))
+            self._map.append(
+                _FnFindInMapDefaultValue(get_hash(obj[3]), obj[3], _depth=_depth)
+            )
 
         self._obj = obj
 
@@ -346,7 +420,46 @@ class _ForEachValueFnFindInMap(_ForEachValue):
     ) -> Any:
         if params is None:
             params = {}
-        t_map = deepcopy(self._map)
+
+        # Memoize the full result of this call.  The resolver is pure
+        # with respect to (cfn, params, only_params, default_on_resolver_failure)
+        # and is called repeatedly inside the Mappings scan below as
+        # well as from recursive parent FindInMaps.  Without this cache
+        # a chain of nested Fn::FindInMaps costs O((M*K)**depth).
+        cache_key: tuple | None = None
+        key_base = self._cache_key(cfn, params, only_params)
+        if key_base is not None:
+            cache_key = key_base + (bool(default_on_resolver_failure),)
+            cached = self._value_cache.get(cache_key, _CACHE_MISS)
+            if cached is not _CACHE_MISS:
+                if isinstance(cached, _ResolveError):
+                    raise cached
+                return cached
+
+        try:
+            result = self._value_impl(
+                cfn, params, only_params, default_on_resolver_failure
+            )
+        except _ResolveError as exc:
+            if cache_key is not None:
+                self._value_cache[cache_key] = exc
+            raise
+        if cache_key is not None:
+            self._value_cache[cache_key] = result
+        return result
+
+    def _value_impl(
+        self,
+        cfn: Any,
+        params: Mapping[str, Any],
+        only_params: bool,
+        default_on_resolver_failure: bool,
+    ) -> Any:
+        # Shallow copy: only the list slots are reassigned below (the
+        # elements themselves are never mutated), so there is no need
+        # for the per-call ``deepcopy`` that used to dominate the
+        # profile.
+        t_map = list(self._map)
         mapping = None
         try:
             mapping = cfn.template.get("Mappings", {}).get(
@@ -362,9 +475,18 @@ class _ForEachValueFnFindInMap(_ForEachValue):
             if mapping is None and isinstance(
                 t_map[1].value(cfn, params, only_params), str
             ):
+                # Hoist the child resolution out of the loop; its value
+                # is deterministic for fixed (cfn, params) and
+                # recomputing it per iteration contributed to the
+                # exponential cost called out in the finding.
+                # ``only_params`` is intentionally left at its default
+                # here to preserve the original behaviour (the outer
+                # guard uses ``only_params``, the inner comparison did
+                # not).
+                t_map_1_value = t_map[1].value(cfn, params)
                 for k, v in cfn.template.get("Mappings", {}).items():
                     if isinstance(v, dict):
-                        if t_map[1].value(cfn, params) in v:
+                        if t_map_1_value in v:
                             t_map[0] = _ForEachValue.create(k)
                             mapping = v
                             break
@@ -375,11 +497,14 @@ class _ForEachValueFnFindInMap(_ForEachValue):
             if mapping is None and isinstance(
                 t_map[2].value(cfn, params, only_params), str
             ):
+                # Hoist out of the double loop (see note above); this is
+                # the specific spot called out in the finding.
+                t_map_2_value_outer = t_map[2].value(cfn, params, only_params)
                 for m1, mv1 in cfn.template.get("Mappings", {}).items():
                     if isinstance(mv1, dict):
                         for k1, kv1 in mv1.items():
                             if isinstance(kv1, dict):
-                                if t_map[2].value(cfn, params, only_params) in kv1:
+                                if t_map_2_value_outer in kv1:
                                     t_map[1] = _ForEachValue.create(k1)
                                     t_map[0] = _ForEachValue.create(m1)
                                     mapping = mv1
@@ -390,6 +515,7 @@ class _ForEachValueFnFindInMap(_ForEachValue):
         if mapping:
             try:
                 t_map[1].value(cfn, params, only_params)
+                # continue to resolution below
             except _ResolveError:
                 try:
                     t_map_2_value = t_map[2].value(cfn, params, only_params)
