@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -132,14 +133,75 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
         path = filename + ".dot"
         if not self.graph:
             return
+
+        # Resolve the destination defensively so a symlink committed in the
+        # linted tree cannot redirect the write to an arbitrary file. The
+        # output must land in the directory of the template (or the CWD when
+        # no directory component was supplied), and the final component must
+        # not already exist as a symlink or regular file.
+        parent_dir = os.path.dirname(path) or "."
         try:
-            self.graph.to_dot(path)
-            LOGGER.info("DOT representation of the graph written to %s", path)
-        except ImportError:
+            allowed_dir = os.path.realpath(parent_dir)
+        except OSError as err:
             LOGGER.error(
-                "Could not write the graph in DOT format. "
-                "Please install either `pygraphviz` or `pydot` modules."
+                "Could not resolve the DOT output directory %r: %s",
+                parent_dir,
+                err,
             )
+            return
+        resolved_parent = os.path.realpath(
+            os.path.join(parent_dir, os.path.basename(path))
+        )
+        # The resolved file path must live directly inside the allowed dir.
+        if os.path.dirname(resolved_parent) != allowed_dir:
+            LOGGER.error(
+                "Refusing to write DOT artifact: resolved path %r escapes"
+                " the template directory %r",
+                resolved_parent,
+                allowed_dir,
+            )
+            return
+        # Refuse to follow an existing symlink or clobber an existing file.
+        if os.path.islink(path) or os.path.lexists(path):
+            LOGGER.error(
+                "Refusing to write DOT artifact: %r already exists; remove"
+                " it or choose a different template name",
+                path,
+            )
+            return
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        # O_NOFOLLOW is POSIX; on platforms (e.g. Windows) that do not define
+        # it, fall back to the baseline flags -- the islink/lexists check
+        # above still prevents following a pre-existing link.
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o644)
+        except FileExistsError:
+            LOGGER.error(
+                "Refusing to write DOT artifact: %r already exists", path
+            )
+            return
+        except OSError as err:
+            LOGGER.error(
+                "Could not open DOT artifact %r for writing: %s", path, err
+            )
+            return
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                try:
+                    self.graph.to_dot(handle)
+                    LOGGER.info(
+                        "DOT representation of the graph written to %s", path
+                    )
+                except ImportError:
+                    LOGGER.error(
+                        "Could not write the graph in DOT format. "
+                        "Please install either `pygraphviz` or `pydot` modules."
+                    )
+        except OSError as err:
+            LOGGER.error("Could not write DOT artifact %r: %s", path, err)
 
     def has_language_extensions_transform(self) -> bool:
         """Check if the template has the AWS::LanguageExtensions transform declared.
