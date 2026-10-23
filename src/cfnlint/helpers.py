@@ -157,7 +157,7 @@ REGEX_IPV6 = re.compile(
 )
 REGEX_DYN_REF = re.compile(r"^.*{{(resolve:.+)}}.*$")
 REGEX_DYN_REF_SPACES = re.compile(
-    r"\{\{\s+resolve\s*:\s*(?:ssm|ssm-secure|secretsmanager)\s*:"
+    r"\{\{\s*resolve\s*:\s*(?:ssm|ssm-secure|secretsmanager)\s*:"
 )
 REGEX_DYN_REF_SSM = re.compile(r"^.*{{resolve:ssm:[a-zA-Z0-9_\.\-/]+(:\d+)?}}.*$")
 REGEX_DYN_REF_SSM_SECURE = re.compile(

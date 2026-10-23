@@ -78,6 +78,19 @@ def template():
             ],
         ),
         (
+            "Validate dynamic references with space between resolve and colon",
+            "{{resolve :ssm-secure:/a}}",
+            {"enum": "Foo"},
+            deque(["Foo", "Test"]),
+            [],
+            [
+                (
+                    "{{resolve :ssm-secure:/a}}",
+                    {"dynamicReferenceSpaces": {"enum": "Foo"}},
+                ),
+            ],
+        ),
+        (
             "Detect raw pseudo-parameter string",
             "AWS::NoValue",
             {"type": "string"},

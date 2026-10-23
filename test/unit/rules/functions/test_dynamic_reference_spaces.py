@@ -76,6 +76,48 @@ def context(cfn):
                 ),
             ],
         ),
+        (
+            "Invalid - space between resolve and the first colon for ssm-secure",
+            "{{resolve :ssm-secure:/a}}",
+            [
+                ValidationError(
+                    (
+                        "'{{resolve :ssm-secure:/a}}' has spaces and will"
+                        " not be resolved as a dynamic reference. Remove"
+                        " spaces from '{{resolve:...}}'"
+                    ),
+                    rule=DynamicReferenceSpaces(),
+                ),
+            ],
+        ),
+        (
+            "Invalid - space immediately after '{{' for ssm",
+            "{{ resolve:ssm:/a}}",
+            [
+                ValidationError(
+                    (
+                        "'{{ resolve:ssm:/a}}' has spaces and will not be"
+                        " resolved as a dynamic reference. Remove spaces"
+                        " from '{{resolve:...}}'"
+                    ),
+                    rule=DynamicReferenceSpaces(),
+                ),
+            ],
+        ),
+        (
+            "Invalid - trailing space before '}}' for ssm-secure",
+            "{{resolve:ssm-secure:/a }}",
+            [
+                ValidationError(
+                    (
+                        "'{{resolve:ssm-secure:/a }}' has spaces and will"
+                        " not be resolved as a dynamic reference. Remove"
+                        " spaces from '{{resolve:...}}'"
+                    ),
+                    rule=DynamicReferenceSpaces(),
+                ),
+            ],
+        ),
     ],
 )
 def test_validate(name, instance, expected, rule, context, cfn):
