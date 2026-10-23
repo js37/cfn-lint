@@ -79,23 +79,26 @@ class SARIFFormatter(BaseFormatter):
         # Output only the rules that have matches
         matched_rules = set(r.rule_id for r in results)
 
-        rules = [
-            sarif.ReportingDescriptor(
-                id=rule_id,
-                short_description=sarif.MultiformatMessageString(
-                    text=rules[rule_id].shortdesc
-                ),
-                full_description=sarif.MultiformatMessageString(
-                    text=rules[rule_id].description
-                ),
-                help_uri=(
-                    rules[rule_id].source_url
-                    if rules[rule_id]
-                    else "https://github.com/aws-cloudformation/cfn-lint/blob/main/docs/rules.md"
-                ),
+        reporting_descriptors = []
+        for rule_id in matched_rules:
+            rule = rules.get(rule_id)
+            reporting_descriptors.append(
+                sarif.ReportingDescriptor(
+                    id=rule_id,
+                    short_description=sarif.MultiformatMessageString(
+                        text=rule.shortdesc if rule else rule_id
+                    ),
+                    full_description=sarif.MultiformatMessageString(
+                        text=rule.description if rule else ""
+                    ),
+                    help_uri=(
+                        rule.source_url
+                        if rule and rule.source_url
+                        else "https://github.com/aws-cloudformation/cfn-lint/blob/main/docs/rules.md"
+                    ),
+                )
             )
-            for rule_id in matched_rules
-        ]
+        rules = reporting_descriptors
 
         run = sarif.Run(
             tool=sarif.Tool(
