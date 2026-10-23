@@ -49,6 +49,16 @@ class Schema:
             None: Returns when the patches have been applied
         """
         jsonpatch.JsonPatch(patches).apply(self.schema, in_place=True)
+        # The patch may have mutated ``typeName``, ``properties``,
+        # ``definitions``, ``readOnlyProperties`` or ``primaryIdentifier``;
+        # the resolver, GetAtt map, Ref schema and cached type name were all
+        # derived eagerly in ``__init__`` from the pre-patch document, so
+        # rebuild them now so that every view of this schema stays consistent
+        # with the patched document.
+        self._type_name = self._schema["typeName"]
+        self.resolver = RefResolver.from_schema(self._schema)
+        self._getatts = GetAtts(self)
+        self._ref = Ref(self)
 
     @property
     def get_atts(self) -> AttributeDict:
