@@ -18,7 +18,10 @@ from cfnlint.helpers import (
 )
 from cfnlint.match import Match
 from cfnlint.template.transforms._language_extensions import language_extension
-from cfnlint.template.transforms._sam_globals import merge_globals
+from cfnlint.template.transforms._sam_globals import (
+    SAMGlobalsMergeError,
+    merge_globals,
+)
 from cfnlint.template.transforms._types import TransformResult
 
 LOGGER = logging.getLogger("cfnlint")
@@ -47,7 +50,26 @@ class Transform:
         # This replaces the full SAM transform — we validate the
         # SAM template directly using SAM schemas instead.
         if TRANSFORM_SAM in transform_type:
-            merge_globals(cfn.template)
+            try:
+                merge_globals(cfn.template)
+            except (
+                SAMGlobalsMergeError,
+                MemoryError,
+                RecursionError,
+            ) as e:
+                LOGGER.debug(e, exc_info=True)
+                # pylint: disable=import-outside-toplevel
+                from cfnlint.rules.errors import (  # pylint: disable=cyclic-import
+                    TransformError,
+                )
+
+                return [
+                    Match.create(
+                        filename=cfn.filename,
+                        rule=TransformError(),
+                        message=f"Error transforming template: {e}",
+                    )
+                ]
 
         cfn.transform_pre["Globals"] = cfn.template.get("Globals", {})
         for name in transform_type:
